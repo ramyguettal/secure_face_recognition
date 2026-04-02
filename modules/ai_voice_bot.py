@@ -33,6 +33,8 @@ class AIVoiceBot:
                         sys.executable, "-c",
                         "import sys, pyttsx3; "
                         "e=pyttsx3.init(); "
+                        "voices = e.getProperty('voices'); "
+                        "e.setProperty('voice', voices[1].id if len(voices) > 1 else voices[0].id); "
                         "e.setProperty('rate', e.getProperty('rate')-30); "
                         "e.say(sys.argv[1]); "
                         "e.runAndWait()",
