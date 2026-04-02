@@ -1,0 +1,26 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# Application Specific Confidential Data
+data/
+*.db
+.face_key
+user_voice_auth.wav
+user_voice_enroll.wav
+temp_recording.wav
+
+# LaTeX Build Files
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.pdf
