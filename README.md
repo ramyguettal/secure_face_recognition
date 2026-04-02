@@ -32,9 +32,22 @@ pip install -r requirements.txt
 > On Windows: install Visual Studio Build Tools with "Desktop development with C++".
 > Or install a pre-built wheel: `pip install dlib` from [dlib releases](https://github.com/sachadee/Dlib).
 
-### 2. Generate the Encryption Key
+### 2. Encryption Key Management
 
-The face embedding database is encrypted with Fernet (AES-128). You **must** set the key as an environment variable — it is never hardcoded.
+The face embedding database is strictly encrypted with Fernet (AES-128). To protect against database breaches, the private key is heavily protected and never hardcoded into the source code.
+
+This system provides a **hybrid key management** feature depending on your needs:
+
+**Option A: Automated GUI Bridging (Recommended for testing / development)**
+When you launch the GUI (`python main.py`), you can click **"🔑 Generate & Set Key"** on the Enrollment screen. 
+This will automatically:
+1. Generate an enterprise-grade AES-key.
+2. Inject it into your active session environment variables.
+3. Silently save it to a protected, hidden local file (`data/.face_key`) so it persists on your machine across restarts. 
+> *Note: By design, our `.gitignore` permanently blocks `.face_key` from ever being uploaded to GitHub.*
+
+**Option B: Strict Environment Variables (For maximum zero-touch security)**
+For true zero-trust environments, you can manually generate the key in the terminal and assign it as an ephemeral variable so it never touches the hard drive text files:
 
 ```bash
 # Generate a key:
@@ -43,16 +56,10 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Copy the output and set the environment variable:
 
-**Windows (CMD):**
+**Windows (CMD/PowerShell):**
 ```cmd
 set FACE_DB_KEY=<your_generated_key>
 ```
-
-**Windows (PowerShell):**
-```powershell
-$env:FACE_DB_KEY = "<your_generated_key>"
-```
-
 **Linux/macOS:**
 ```bash
 export FACE_DB_KEY="<your_generated_key>"

@@ -46,9 +46,16 @@ Crucially, the entire system is designed with a \textbf{privacy-first philosophy
 \section{System Architecture}
 The authentication flow follows a strict, sequential pipeline. A failure at any single step immediately halts the process, records an audit log, and denies access.
 
-\subsection{1. Facial Recognition \& Encrypted Identity}
+\subsection{1. Facial Recognition \& Hybrid Identity Encryption}
 The foundation of the pipeline relies on facial feature extraction. Rather than storing identifiable images of a user, the system converts the face into an abstract, 128-dimensional embedding. 
+
 To mitigate the catastrophic risks of database breaches, these embeddings are \textbf{encrypted at rest using AES (Fernet encryption)}. Even if an attacker gains access to the database, they cannot reverse-engineer the embeddings or steal the users' geometric facial data.
+
+\textbf{Hybrid Key Management:} Managing encryption keys securely yet practically is a notorious security challenge. To solve this without sacrificing user experience, the system utilizes a proprietary hybrid structure:
+\begin{enumerate}
+    \item \textbf{Strict Environment Isolation (Production):} By default, the application demands that the 128-bit AES key exists purely as an ephemeral environment variable (\texttt{FACE\_DB\_KEY}). This ensures that the key never natively touches the physical hard drive, satisfying zero-trust enterprise requirements.
+    \item \textbf{Automated Local Bridging (Development):} To prevent the friction of continually re-injecting keys via the terminal during development and enrollment, the graphical system provides an automated generation bridge. It mathematically generates a secure cryptographic key, injects it directly into the active session memory, and covertly writes it to a hidden, heavily localized \texttt{.face\_key} file. The system's Version Control bindings (.gitignore) are hardcoded to aggressively filter and mask this file from repository commits, guaranteeing the key never leaks to the cloud even when the encrypted database is pushed.
+\end{enumerate}
 
 \subsection{2. Presentation Attack Detection (Anti-Spoofing)}
 Simply matching a face is insecure, as an attacker could hold up a printed photograph or an iPad screen. The system incorporates a layer of Presentation Attack Detection (PAD):
