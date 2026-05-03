@@ -8,13 +8,44 @@ venv/
 env/
 .env
 
-# Application Specific Confidential Data
+# ─── SECURITY: All sensitive data ────────────────────────────────────────
+
+# Encrypted & plaintext database files
 data/
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Encryption key files (NEVER commit these)
 .face_key
+*.key
+data/.face_key
+
+# Audio / voice biometric data (NEVER commit these)
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.m4a
 user_voice_auth.wav
 user_voice_enroll.wav
 temp_recording.wav
+
+# Encrypted files
+*.enc
+*.encrypted
+
+# Audit logs (encrypted or plaintext)
+audit.log
+audit.log.*
+*.log.enc
+*.log.enc.*
+
+# Secure temp directory
+data/.secure_tmp/
+
+# ─── IDE / OS ────────────────────────────────────────────────────────────
 
 # LaTeX Build Files
 *.aux
@@ -24,3 +55,15 @@ temp_recording.wav
 *.out
 *.synctex.gz
 *.pdf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

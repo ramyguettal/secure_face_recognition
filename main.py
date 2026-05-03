@@ -226,6 +226,13 @@ def run_pipeline_cli(camera_source=None) -> str | None:
         head_challenge.close()
         blink_challenge.close()
         greeter.cleanup()
+        # Securely wipe all temporary files
+        try:
+            from modules.secure_storage import cleanup_secure_temp, cleanup_residual_wav_files
+            cleanup_secure_temp()
+            cleanup_residual_wav_files()
+        except Exception:
+            pass
 
 
 def main() -> None:

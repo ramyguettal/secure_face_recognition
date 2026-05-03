@@ -7,6 +7,10 @@ Flow:
   3. GUI shows a "RECORDING" countdown with a big timer
   4. Transcribe and check the phrase
   5. Compare voiceprint against stored DB embedding (resemblyzer)
+
+SECURITY:
+  - Voice recordings are stored in the secure temp directory
+  - All WAV files are securely wiped after transcription + voiceprint comparison
 """
 
 import os
@@ -19,6 +23,7 @@ from typing import Tuple, Optional, Callable
 
 sys.path.insert(0, os.path.dirname(__file__))
 import config
+from modules.secure_storage import secure_delete
 
 
 class VoiceChallenge:
@@ -101,9 +106,10 @@ class VoiceChallenge:
                 f"🔴  RECORDING NOW!  Say: \"{phrase}\"\n"
                 f"     ⏱️  {duration}s remaining")
 
+        # Record to secure temp directory (not project root)
         record_result = [None]
         def do_record():
-            record_result[0] = avb.bot.record_audio(duration, "user_voice_auth.wav")
+            record_result[0] = avb.bot.record_audio(duration, "voice_auth_challenge.wav")
 
         rec_thread = threading.Thread(target=do_record, daemon=True)
         rec_thread.start()
@@ -122,47 +128,54 @@ class VoiceChallenge:
                     f"     {bar}  {remaining:.0f}s")
             time.sleep(0.25)
 
-        wav_file = record_result[0] or "user_voice_auth.wav"
+        wav_file = record_result[0] or "voice_auth_challenge.wav"
 
         # ── 4. Processing ──
         if update_ui_callback:
             update_ui_callback("⏳  Analyzing your voice...")
 
-        transcript = avb.bot.transcribe(wav_file).lower()
-        print(f"[VOICE CHALLENGE] Expected: '{phrase}'")
-        print(f"[VOICE CHALLENGE] Heard:    '{transcript}'")
+        try:
+            transcript = avb.bot.transcribe(wav_file).lower()
+            print(f"[VOICE CHALLENGE] Expected: '{phrase}'")
+            print(f"[VOICE CHALLENGE] Heard:    '{transcript}'")
 
-        if not transcript:
-            return False, "Could not hear or transcribe any voice."
+            if not transcript:
+                return False, "Could not hear or transcribe any voice."
 
-        # ── 5. Phrase matching ──
-        matched_words = 0
-        expected_words = phrase.lower().split()
-        heard_words = transcript.split()
+            # ── 5. Phrase matching ──
+            matched_words = 0
+            expected_words = phrase.lower().split()
+            heard_words = transcript.split()
 
-        for w in expected_words:
-            if w in heard_words:
-                matched_words += 1
+            for w in expected_words:
+                if w in heard_words:
+                    matched_words += 1
 
-        phrase_ratio = matched_words / len(expected_words)
-        print(f"[VOICE CHALLENGE] Phrase match: {phrase_ratio:.0%}")
+            phrase_ratio = matched_words / len(expected_words)
+            print(f"[VOICE CHALLENGE] Phrase match: {phrase_ratio:.0%}")
 
-        if phrase_ratio < 0.4:
-            return False, f"Phrase mismatch ({phrase_ratio:.0%}). Heard: '{transcript}'"
+            if phrase_ratio < 0.4:
+                return False, f"Phrase mismatch ({phrase_ratio:.0%}). Heard: '{transcript}'"
 
-        # ── 6. Speaker verification (voiceprint vs DB) ──
-        if update_ui_callback:
-            update_ui_callback("🔐  Verifying voiceprint...")
+            # ── 6. Speaker verification (voiceprint vs DB) ──
+            if update_ui_callback:
+                update_ui_callback("🔐  Verifying voiceprint...")
 
-        speaker_match, similarity = self._compare_voiceprint(wav_file, user_id)
-        if not speaker_match:
-            return False, (
-                f"Speaker mismatch (similarity: {similarity:.2f}). "
-                f"Voice does not match enrolled user.")
+            speaker_match, similarity = self._compare_voiceprint(wav_file, user_id)
+            if not speaker_match:
+                return False, (
+                    f"Speaker mismatch (similarity: {similarity:.2f}). "
+                    f"Voice does not match enrolled user.")
 
-        # ── Result ──
-        result = f"Voice verified (phrase: {phrase_ratio:.0%}"
-        if self._resemblyzer_available and similarity < 1.0:
-            result += f", speaker: {similarity:.2f}"
-        result += ")."
-        return True, result
+            # ── Result ──
+            result = f"Voice verified (phrase: {phrase_ratio:.0%}"
+            if self._resemblyzer_available and similarity < 1.0:
+                result += f", speaker: {similarity:.2f}"
+            result += ")."
+            return True, result
+
+        finally:
+            # ── SECURITY: Securely wipe the voice recording ──
+            if wav_file and os.path.exists(wav_file):
+                secure_delete(wav_file)
+                print(f"[SECURITY] Voice recording securely wiped after processing.")

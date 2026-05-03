@@ -85,6 +85,11 @@ SECURITY_ALERT_THRESHOLD: int = 3          # Failures from same user to trigger 
 FACE_DB_PATH: str = "data/face_db.db"
 FACE_DB_KEY_FILE: str = "data/.face_key"  # Persistent key file (auto-created)
 
+# ─── Secure Storage ─────────────────────────────────────────────────────────
+SECURE_TEMP_DIR: str = "data/.secure_tmp"      # Transient files (auto-wiped)
+SECURE_WIPE_PASSES: int = 3                    # DoD 5220.22-M overwrite passes
+ENCRYPTED_AUDIT_LOG: str = "data/audit.log.enc" # Encrypted audit log file
+
 # ─── Camera ─────────────────────────────────────────────────────────────────
 CAMERA_INDEX: int = 0                      # Default camera index
 CAMERA_FRAME_WIDTH: int = 640

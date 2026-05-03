@@ -1,11 +1,26 @@
+"""
+ai_voice_bot.py — AI Voice Bot for TTS, audio recording, and transcription.
+
+SECURITY:
+  - Audio is recorded to a secure temp directory (data/.secure_tmp/)
+  - All WAV files are securely wiped (multi-pass overwrite) after processing
+  - No voice data persists on disk after the pipeline completes
+"""
+
 import threading
 import queue
 import time
 import sys
+import os
 import subprocess
 import sounddevice as sd
 from scipy.io import wavfile
 import speech_recognition as sr
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from modules.secure_storage import (
+    get_secure_temp_dir, secure_delete, cleanup_secure_temp
+)
 
 
 class AIVoiceBot:
@@ -16,6 +31,9 @@ class AIVoiceBot:
 
         self.fs = 44100
         self.r = sr.Recognizer()
+
+        # Track temporary files for cleanup
+        self._temp_files = []
 
 
     def _worker(self):
@@ -34,7 +52,7 @@ class AIVoiceBot:
                         "import sys, pyttsx3; "
                         "e=pyttsx3.init(); "
                         "voices = e.getProperty('voices'); "
-                        "e.setProperty('voice', voices[1].id if len(voices) > 1 else voices[0].id); "
+                        "e.setProperty('voice', voices[0].id if len(voices) > 0 else voices[0].id); "
                         "e.setProperty('rate', e.getProperty('rate')-30); "
                         "e.say(sys.argv[1]); "
                         "e.runAndWait()",
@@ -67,16 +85,29 @@ class AIVoiceBot:
         time.sleep(0.3)      # tiny natural pause after speech
 
     def record_audio(self, duration_sec: int, filename="temp_recording.wav"):
-        """Record audio from the default microphone."""
-        print(f"[VOICE BOT] Recording {duration_sec}s...")
+        """
+        Record audio from the default microphone into the secure temp directory.
+
+        The file is stored in data/.secure_tmp/ instead of the project root.
+        The returned path should be passed to secure_delete() after processing.
+        """
+        # Route all recordings to the secure temp directory
+        secure_dir = get_secure_temp_dir()
+        basename = os.path.basename(filename)
+        secure_path = os.path.join(secure_dir, basename)
+
+        print(f"[VOICE BOT] Recording {duration_sec}s to secure temp...")
         recording = sd.rec(
             int(duration_sec * self.fs),
             samplerate=self.fs, channels=1, dtype="int16",
         )
         sd.wait()
-        wavfile.write(filename, self.fs, recording)
-        print("[VOICE BOT] Recording complete.")
-        return filename
+        wavfile.write(secure_path, self.fs, recording)
+        print("[VOICE BOT] Recording complete (secure temp).")
+
+        # Track for cleanup
+        self._temp_files.append(secure_path)
+        return secure_path
 
     def transcribe(self, filename="temp_recording.wav") -> str:
         """Transcribe a WAV file to text using OpenAI Whisper (local, no ffmpeg needed)."""
@@ -121,6 +152,25 @@ class AIVoiceBot:
         except Exception as e:
             print(f"[VOICE BOT] Whisper transcription error: {e}")
             return ""
+
+    def secure_cleanup(self):
+        """Securely wipe all temporary audio files created by this bot."""
+        cleaned = 0
+        for filepath in self._temp_files:
+            if os.path.exists(filepath):
+                secure_delete(filepath)
+                cleaned += 1
+        self._temp_files.clear()
+        if cleaned:
+            print(f"[VOICE BOT] Securely wiped {cleaned} temp audio file(s).")
+
+    def cleanup_file(self, filepath: str):
+        """Securely wipe a specific audio file after processing."""
+        if filepath and os.path.exists(filepath):
+            secure_delete(filepath)
+            if filepath in self._temp_files:
+                self._temp_files.remove(filepath)
+            print(f"[VOICE BOT] Securely wiped: {os.path.basename(filepath)}")
 
 
 bot = AIVoiceBot()

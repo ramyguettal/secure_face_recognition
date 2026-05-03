@@ -16,7 +16,20 @@ Step 4: Head Movement → Random direction challenge with MediaPipe Face Mesh
 Step 5: Blink         → EAR detection with random timing + variance check
 Step 6: Voice         → Random passphrase (Whisper STT) + Voiceprint Match (Resemblyzer)
 Layer 2: Session      → Cryptographic token + JSON-lines audit log
+Layer 3: Storage      → Encrypted DB, Encrypted Logs, 3-Pass Audio Wiper
 ```
+
+---
+
+## 🔒 Data Security & Privacy (Overhaul)
+
+This system implements **Zero-Persistence** for sensitive biometric buffers and **Data-at-Rest Encryption** for all stored profiles:
+
+1. **Fully Encrypted Database**: The SQLite database (`face_db.db`) stores **no plaintext PII**. `user_id` and `display_name` are encrypted via Fernet (AES-128). Lookups are performed using irreversible **HMAC-SHA256 hashes**.
+2. **Ephemeral Voice Processing**: Voice recordings (`.wav`) are routed to a protected temporary directory (`data/.secure_tmp/`). Immediately after processing (STT and Voiceprint matching), the audio files are wiped using **DoD 5220.22-M standards** (3-pass random byte overwrite + zero fill) before OS deletion.
+3. **Encrypted Audit Logs**: `audit.log.enc` stores access events. Each individual log line is an independently encrypted Fernet token, ensuring IP addresses and User IDs remain secure even if the log file is stolen.
+4. **OS-Level Key Protection**: The master encryption key (`.face_key`) is dynamically assigned restrictive OS permissions (`icacls` on Windows, `chmod 600` on Unix), binding access strictly to the owner account.
+5. **Auto-Generated User IDs**: Enrollment generates random UUIDs (`USR-XXXX`) instead of relying on manual inputs, preventing identity inference.
 
 ---
 
@@ -70,15 +83,16 @@ export FACE_DB_KEY="<your_generated_key>"
 ### 3. Enroll a User
 
 ```bash
-python enroll.py
+python main.py
 ```
+*(Or launch `python enroll.py` for CLI)*
 
 This will:
-1. Ask for a user ID and display name
-2. Capture **5 face images** from your webcam (with guided poses)
-3. Average the face embeddings for robustness
-4. Optionally capture a **voiceprint** for speaker verification
-5. Encrypt everything and store it in `data/face_db.db`
+1. Auto-generate a secure User ID and ask for a Display Name.
+2. Capture **5 face images** from your webcam (with guided poses).
+3. Average the face embeddings for robustness.
+4. Capture a **voiceprint** for speaker verification (securely wiped from disk immediately after).
+5. Encrypt everything and store it in `data/face_db.db`.
 
 ### 4. Run Authentication
 
@@ -105,8 +119,9 @@ The system will run the full pipeline. It short-circuits immediately if any step
 
 | # | Vulnerability            | Severity | Fix Implemented                                 |
 |---|--------------------------|----------|--------------------------------------------------|
-| 1 | Face DB breach           | HIGH     | Fernet AES encryption; key in env variable       |
-| 2 | No rate limiting         | HIGH     | Exponential backoff (2^n) + 15-min lockout       |
+| 1 | Face DB & PII breach     | HIGH     | Fernet AES encryption + HMAC-SHA256 Lookups      |
+| 2 | Biometric file leftovers | HIGH     | Voice recordings wiped with DoD 3-pass overwrite |
+| 3 | No rate limiting         | HIGH     | Exponential backoff (2^n) + 15-min lockout       |
 | 3 | Photo/screen spoofing    | HIGH     | Texture + brightness + color PAD analysis        |
 | 4 | Looped video (blink)     | HIGH     | Random timing + EAR variance check + PAD gate    |
 | 5 | Voice replay / Deepfake  | HIGH     | Random phrase (Whisper STT) + Speaker Verification (Resemblyzer) |
@@ -125,7 +140,8 @@ secure_face_auth/
 ├── enroll.py                        # CLI enrollment tool
 ├── modules/
 │   ├── __init__.py
-│   ├── camera.py                    # Step 1: webcam + face detection
+│   ├── secure_storage.py            # Core Security: encryption, HMAC, DoD wiping
+│   ├── camera.py                    # Step 1: webcam + face detection (DSHOW fixed)
 │   ├── face_recognition_module.py   # Step 2: encrypted embedding match
 │   ├── anti_spoofing.py             # Layer 1: PAD / liveness
 │   ├── voice_greeting.py            # Step 3: neutral TTS greeting
@@ -133,10 +149,11 @@ secure_face_auth/
 │   ├── blink_detection.py           # Step 5: EAR blink detection
 │   ├── voice_challenge.py           # Step 6: Whisper STT & Resemblyzer voiceprint
 │   ├── ai_voice_bot.py              # Text-to-Speech & Speech-to-Text logic
-│   └── session.py                   # Layer 2: token + audit
+│   └── session.py                   # Layer 2: token + encrypted audit logger
 ├── data/
 │   ├── face_db.db                   # Encrypted SQLite database (auto-created)
-│   └── audit.log                    # Rotating audit log (auto-created)
+│   ├── audit.log.enc                # Encrypted rotating audit log
+│   └── .secure_tmp/                 # Ephemeral folder for biometric buffers
 ├── models/
 │   └── anti_spoof_model/            # (Optional) Pre-trained PAD weights
 ├── requirements.txt

@@ -16,7 +16,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import config
 from modules.camera import CameraCapture
-from modules.face_recognition_module import enroll_user, _get_fernet
+from modules.face_recognition_module import (
+    enroll_user, _get_fernet, check_user_exists,
+    get_live_embedding, match_face, decrypt_embedding
+)
 
 
 def capture_face_images(camera: CameraCapture, count: int = config.ENROLLMENT_CAPTURE_COUNT) -> list:
@@ -85,6 +88,44 @@ def capture_face_images(camera: CameraCapture, count: int = config.ENROLLMENT_CA
     return images
 
 
+def check_face_duplicate(face_images: list) -> "tuple | None":
+    """
+    Check if the captured faces already exist in the database.
+    
+    Returns:
+        (user_id, display_name, distance) if face match found, None otherwise.
+    """
+    if not face_images:
+        return None
+    
+    print("\n  🔍 Checking if this face is already enrolled...")
+    
+    # Extract embeddings from all captured images
+    embeddings = []
+    for idx, img in enumerate(face_images):
+        try:
+            embedding = get_live_embedding(img)
+            if embedding is not None:
+                embeddings.append(embedding)
+                print(f"    Image {idx + 1}: ✓ Face detected")
+            else:
+                print(f"    Image {idx + 1}: ✗ No face found")
+        except Exception as e:
+            print(f"    Image {idx + 1}: ✗ Error: {e}")
+    
+    if not embeddings:
+        print("  ⚠️  Could not extract face embeddings")
+        return None
+    
+    # Average embeddings (same as enrollment does)
+    avg_embedding = np.mean(embeddings, axis=0)
+    
+    # Check if this face matches any enrolled user
+    match_result = match_face(avg_embedding)
+    
+    return match_result
+
+
 def capture_voiceprint() -> "np.ndarray | None":
     """
     Capture a voiceprint sample for speaker verification.
@@ -93,8 +134,8 @@ def capture_voiceprint() -> "np.ndarray | None":
     try:
         import speech_recognition as sr
         from resemblyzer import VoiceEncoder, preprocess_wav
-        import tempfile
         import wave
+        from modules.secure_storage import get_secure_temp_dir, secure_delete
     except ImportError as e:
         print(f"[WARN] Voiceprint enrollment unavailable: {e}")
         print("[INFO] Skipping voiceprint — voice challenge will use phrase matching only.")
@@ -112,8 +153,8 @@ def capture_voiceprint() -> "np.ndarray | None":
             print("  [Recording...] Speak now!")
             audio = recognizer.listen(source, timeout=5, phrase_time_limit=8)
 
-        # Save audio to temp WAV file for resemblyzer
-        temp_wav = os.path.join(tempfile.gettempdir(), "enroll_voice.wav")
+        # Save audio to secure temp WAV file for resemblyzer
+        temp_wav = os.path.join(get_secure_temp_dir(), "enroll_voice_tmp.wav")
         with open(temp_wav, "wb") as f:
             f.write(audio.get_wav_data())
 
@@ -123,8 +164,8 @@ def capture_voiceprint() -> "np.ndarray | None":
         embedding = encoder.embed_utterance(wav)
         print("  ✓ Voiceprint captured!")
 
-        # Clean up
-        os.remove(temp_wav)
+        # Securely wipe the temporary voice file
+        secure_delete(temp_wav)
         return embedding.astype(np.float32)
 
     except sr.WaitTimeoutError:
@@ -158,6 +199,15 @@ def main() -> None:
         print("[ERROR] User ID cannot be empty.")
         sys.exit(1)
 
+    # ✅ CHECK IF USER ALREADY EXISTS (BEFORE capturing images!)
+    if check_user_exists(user_id):
+        print(f"\n  ⚠️  User '{user_id}' is already enrolled!")
+        update_choice = input("  Re-enroll this user? (y/n): ").strip().lower()
+        if update_choice != 'y':
+            print("  [INFO] Enrollment cancelled.")
+            sys.exit(0)
+        print("  [INFO] Starting re-enrollment process...\n")
+
     display_name = input("  Enter display name (e.g. 'Alice Johnson'): ").strip()
     if not display_name:
         display_name = user_id
@@ -170,6 +220,35 @@ def main() -> None:
     if len(face_images) < 3:
         print(f"\n[ERROR] Need at least 3 face images, got {len(face_images)}. Aborting.")
         sys.exit(1)
+
+    # ✅ CHECK IF FACE ALREADY EXISTS IN DATABASE
+    face_match = check_face_duplicate(face_images)
+    if face_match:
+        matched_user_id, matched_display_name, distance = face_match
+        print(f"\n  ⚠️  WARNING: This face matches an existing user!")
+        print(f"     User ID: {matched_user_id}")
+        print(f"     Display Name: {matched_display_name}")
+        print(f"     Match distance: {distance:.4f}")
+        
+        if matched_user_id == user_id:
+            print(f"     (Same user - this is a re-enrollment)")
+        else:
+            print(f"     ⚠️  Different user detected!")
+        
+        force_enroll = input("\n  Continue anyway? (y/n): ").strip().lower()
+        if force_enroll != 'y':
+            print("  [INFO] Enrollment cancelled to avoid duplicates.")
+            sys.exit(0)
+        print("  [INFO] Proceeding with enrollment...\n")
+
+    # ✅ CONFIRMATION BEFORE PROCEEDING
+    print(f"\n  👤 User ID: {user_id}")
+    print(f"  📝 Display Name: {display_name}")
+    print(f"  📸 Face Images Captured: {len(face_images)}")
+    confirm = input("\n  Proceed with enrollment? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("  [INFO] Enrollment cancelled.")
+        sys.exit(0)
 
     # Capture voiceprint (optional)
     voiceprint = None

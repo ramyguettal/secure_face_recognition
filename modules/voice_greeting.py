@@ -27,7 +27,13 @@ class VoiceGreeting:
             self.engine = pyttsx3.init()
             self.engine.setProperty('rate', 160)  # Speaking speed
             self.engine.setProperty('volume', 0.9)
-            print("[INFO] TTS engine initialized.")
+            
+            # Set to male voice (voices[0] is typically male on most systems)
+            voices = self.engine.getProperty('voices')
+            if len(voices) > 0:
+                self.engine.setProperty('voice', voices[0].id)
+            
+            print("[INFO] TTS engine initialized (male voice).")
         except Exception as e:
             print(f"[WARN] Could not initialize TTS engine: {e}")
             print("[WARN] Voice greeting will be displayed on screen only.")

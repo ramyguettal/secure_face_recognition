@@ -1057,13 +1057,17 @@ class SecureFaceAuthApp:
                      font=("Consolas", 9), bg=COLORS["bg_card"], fg=COLORS["text_muted"],
                      justify="left").pack(padx=8, pady=(8, 0))
         else:
-            # User ID
-            tk.Label(card, text="User ID", font=(FONT, 10, "bold"),
+            # User ID (Auto-generated)
+            import uuid
+            auto_uid = f"USR-{uuid.uuid4().hex[:8].upper()}"
+            
+            tk.Label(card, text="User ID (Auto-generated)", font=(FONT, 10, "bold"),
                      bg=COLORS["bg_card"], fg=COLORS["text_secondary"], anchor="w").pack(fill="x", pady=(0, 2))
             self.enroll_uid_entry = tk.Entry(card, font=(FONT, 12), width=30,
-                                              bg=COLORS["bg_input"], fg=COLORS["text_primary"],
-                                              insertbackground=COLORS["text_primary"], relief="flat",
-                                              highlightthickness=1, highlightbackground=COLORS["border"])
+                                              bg=COLORS["bg_dark"], fg=COLORS["text_muted"],
+                                              relief="flat", highlightthickness=1, highlightbackground=COLORS["border"])
+            self.enroll_uid_entry.insert(0, auto_uid)
+            self.enroll_uid_entry.config(state="readonly")
             self.enroll_uid_entry.pack(fill="x", pady=(0, 12), ipady=6)
 
             # Display Name
@@ -1086,22 +1090,15 @@ class SecureFaceAuthApp:
                    width=160, height=38, bg=COLORS["step_pending"], font_size=10).pack(pady=(20, 0))
 
     def _auto_generate_key(self):
-        """Auto-generate a Fernet key and save it persistently."""
-        from cryptography.fernet import Fernet
-        key = Fernet.generate_key().decode()
-        os.environ[config.FACE_DB_KEY_ENV] = key
-
-        # Save to persistent file
-        key_file = os.path.join(os.path.dirname(__file__), config.FACE_DB_KEY_FILE)
-        os.makedirs(os.path.dirname(key_file), exist_ok=True)
-        with open(key_file, "w") as f:
-            f.write(key)
+        """Auto-generate a Fernet key and save it with restrictive permissions."""
+        from modules.secure_storage import generate_and_save_key
+        key = generate_and_save_key()
 
         messagebox.showinfo("Key Generated",
                             f"Encryption key has been generated and saved!\n\n"
                             f"Key: {key[:20]}...\n\n"
-                            f"The key is stored in {config.FACE_DB_KEY_FILE}\n"
-                            f"and will persist across app restarts.")
+                            f"The key is stored securely in {config.FACE_DB_KEY_FILE}\n"
+                            f"with restricted file permissions.")
         self._show_enroll()  # Refresh to show the form
 
     def _stop_enroll_camera(self):
@@ -1316,11 +1313,11 @@ class SecureFaceAuthApp:
         if self._enroll_cancelled:
             return
 
-        # Record the user's voice with a timer
+        # Record the user's voice with a timer (to secure temp directory)
         duration = 10
         record_result = [None]
         def do_record():
-            record_result[0] = voice_bot.record_audio(duration, "user_voice_enroll.wav")
+            record_result[0] = voice_bot.record_audio(duration, "voice_enroll_capture.wav")
 
         rec_thread = threading.Thread(target=do_record, daemon=True)
         rec_thread.start()
@@ -1339,7 +1336,7 @@ class SecureFaceAuthApp:
             self._gui(self._status, "Recording voice...", COLORS["error"])
             time.sleep(0.25)
             
-        wav_file = record_result[0] or "user_voice_enroll.wav"
+        wav_file = record_result[0] or "voice_enroll_capture.wav"
 
         if self._enroll_cancelled:
             return
@@ -1369,20 +1366,31 @@ class SecureFaceAuthApp:
             except Exception as e:
                 print(f"[ENROLL] Voiceprint extraction failed: {e}")
 
+            # Securely wipe the voice recording after extracting voiceprint
+            if wav_file and os.path.exists(wav_file):
+                from modules.secure_storage import secure_delete as sd
+                sd(wav_file)
+                print(f"[SECURITY] Enrollment voice recording securely wiped.")
+
             print(f"[ENROLL] Calling enroll_user with {len(images)} images...")
             success = enroll_user(uid, name, images, voiceprint=voiceprint_embedding)
             print(f"[ENROLL] enroll_user returned: {success}")
             if success:
                 voice_bot.speak_sync("excellent, we have successfully enrolled you")
                 self._gui(self._show_home)
-                self._gui(lambda: self._show_result_banner(True, f"✅  ENROLLMENT COMPLETE — User '{name}' ({uid}) successfully authenticated and saved!"))
+                self._gui(lambda: self._show_result_banner(True, f"✅  ENROLLMENT COMPLETE — User '{name}' enrolled securely!"))
             else:
                 voice_bot.speak_sync("sorry, enrollment failed. please try again")
                 self._gui(self._show_enroll)
                 self._gui(lambda: self._show_result_banner(False, "❌  ENROLLMENT FAILED — Could not extract enough face encodings. Ensure good lighting."))
         except Exception as e:
+            import traceback
             print(f"[ENROLL ERROR] {e}")
-            voice_bot.speak_sync("sorry, there was an error during enrollment")
+            traceback.print_exc()
+            try:
+                voice_bot.speak_sync("sorry, there was an error during enrollment")
+            except Exception:
+                pass
             self._gui(self._show_enroll)
             self._gui(lambda: self._show_result_banner(False, f"❌  ENROLLMENT ERROR — {e}"))
 
@@ -1452,6 +1460,16 @@ class SecureFaceAuthApp:
     def _on_close(self):
         self._stop_camera()
         self._stop_enroll_camera()
+        # Securely wipe all temporary files on exit
+        try:
+            from modules.secure_storage import cleanup_secure_temp, cleanup_residual_wav_files
+            cleaned = cleanup_secure_temp()
+            residual = cleanup_residual_wav_files()
+            if cleaned or residual:
+                print(f"[SECURITY] Cleaned up {cleaned + residual} temp file(s) on exit.")
+            voice_bot.secure_cleanup()
+        except Exception as e:
+            print(f"[SECURITY] Cleanup error on exit: {e}")
         self.root.destroy()
 
 

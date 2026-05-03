@@ -4,6 +4,11 @@ face_recognition_module.py — Step 2: Face embedding match against encrypted da
 Uses the face_recognition library (dlib-based) to generate 128-d embeddings.
 Embeddings are encrypted at rest with Fernet (AES-128). Includes rate limiting
 with exponential backoff and lockout.
+
+SECURITY:
+  - All user data (user_id, display_name, embedding, voiceprint) is encrypted at rest.
+  - User lookup uses HMAC-SHA256 hash — no plaintext user_id stored in the database.
+  - Auto-migrates any legacy plaintext data on first run.
 """
 
 import os
@@ -15,24 +20,42 @@ import cv2
 import face_recognition
 from cryptography.fernet import Fernet
 from typing import Optional, Tuple, Dict, List
-from sqlalchemy import create_engine, Column, String, LargeBinary, Integer
+from sqlalchemy import create_engine, Column, String, LargeBinary, Integer, inspect
 from sqlalchemy.orm import declarative_base, Session
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+from modules.secure_storage import (
+    get_fernet, encrypt_field, decrypt_field, hmac_hash
+)
 
 Base = declarative_base()
 
 
 class EnrolledUser(Base):
-    """SQLAlchemy model for the enrolled user database."""
+    """
+    SQLAlchemy model for the enrolled user database.
+
+    All PII fields are encrypted:
+      - user_id_hash: HMAC-SHA256 of user_id (for lookups, irreversible)
+      - encrypted_user_id: Fernet-encrypted user_id
+      - encrypted_display_name: Fernet-encrypted display name
+      - encrypted_embedding: Fernet-encrypted 128-d face embedding
+      - encrypted_voiceprint: Fernet-encrypted voice embedding (optional)
+    """
     __tablename__ = "enrolled_users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String, unique=True, nullable=False)
-    display_name = Column(String, nullable=False)
+    # Legacy columns (kept for migration, will be NULLed after migration)
+    user_id = Column(String, nullable=True)
+    display_name = Column(String, nullable=True)
+    # New secure columns
+    user_id_hash = Column(String, nullable=True, index=True)
+    encrypted_user_id = Column(LargeBinary, nullable=True)
+    encrypted_display_name = Column(LargeBinary, nullable=True)
+    # Already encrypted
     encrypted_embedding = Column(LargeBinary, nullable=False)
-    encrypted_voiceprint = Column(LargeBinary, nullable=True)  # For Step 6 speaker verification
+    encrypted_voiceprint = Column(LargeBinary, nullable=True)
 
 
 class RateLimiter:
@@ -104,30 +127,10 @@ class RateLimiter:
             del self._attempts[identifier]
 
 
+# ─── Backward-compatible alias ──────────────────────────────────────────────
 def _get_fernet() -> Fernet:
-    """Retrieve the Fernet encryption key from file or environment variable."""
-    key = None
-
-    # 1. Try persistent key file first
-    key_file = os.path.join(os.path.dirname(__file__), "..", config.FACE_DB_KEY_FILE)
-    if os.path.exists(key_file):
-        with open(key_file, "r") as f:
-            key = f.read().strip()
-        if key:
-            # Also set env var so rest of session works
-            os.environ[config.FACE_DB_KEY_ENV] = key
-
-    # 2. Fall back to environment variable
-    if not key:
-        key = os.environ.get(config.FACE_DB_KEY_ENV)
-
-    if not key:
-        raise EnvironmentError(
-            f"[ERROR] Environment variable '{config.FACE_DB_KEY_ENV}' is not set.\n"
-            f"Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n"
-            f"Then set it: set {config.FACE_DB_KEY_ENV}=<your_key>"
-        )
-    return Fernet(key.encode() if isinstance(key, str) else key)
+    """Retrieve the Fernet encryption key. Delegates to secure_storage."""
+    return get_fernet()
 
 
 def _get_engine():
@@ -139,24 +142,85 @@ def _get_engine():
     return engine
 
 
+# ─── Database Migration ────────────────────────────────────────────────────
+
+def _migrate_if_needed(engine) -> None:
+    """
+    Auto-migrate legacy plaintext user data to encrypted format.
+
+    Checks if any rows have plaintext user_id set (legacy format).
+    If found, encrypts user_id and display_name, creates HMAC hash,
+    and NULLs out the plaintext columns.
+    """
+    try:
+        with Session(engine) as session:
+            # Find rows with legacy plaintext data
+            legacy_users = (
+                session.query(EnrolledUser)
+                .filter(
+                    EnrolledUser.user_id.isnot(None),
+                    EnrolledUser.user_id != "",
+                    # Only migrate rows that haven't been migrated yet
+                    EnrolledUser.user_id_hash.is_(None)
+                )
+                .all()
+            )
+
+            if not legacy_users:
+                return
+
+            print(f"[MIGRATION] Encrypting {len(legacy_users)} legacy user record(s)...")
+
+            for user in legacy_users:
+                uid = user.user_id
+                dname = user.display_name or uid
+
+                # Create encrypted versions
+                user.user_id_hash = hmac_hash(uid, "user_id")
+                user.encrypted_user_id = encrypt_field(uid)
+                user.encrypted_display_name = encrypt_field(dname)
+
+                # Clear plaintext columns
+                user.user_id = None
+                user.display_name = None
+
+                print(f"[MIGRATION]   Encrypted user: {uid[:1]}*** -> HMAC:{user.user_id_hash[:12]}...")
+
+            session.commit()
+            print(f"[MIGRATION] ✓ All legacy records encrypted successfully.")
+
+    except Exception as e:
+        print(f"[MIGRATION] Warning: Could not migrate legacy data: {e}")
+
+
+# ─── Encryption Helpers ────────────────────────────────────────────────────
+
 def encrypt_embedding(embedding: np.ndarray) -> bytes:
     """Encrypt a face embedding array using Fernet."""
-    fernet = _get_fernet()
+    fernet = get_fernet()
     embedding_bytes = embedding.tobytes()
     return fernet.encrypt(embedding_bytes)
 
 
 def decrypt_embedding(encrypted: bytes) -> np.ndarray:
     """Decrypt an encrypted face embedding back to a numpy array."""
-    fernet = _get_fernet()
+    fernet = get_fernet()
     decrypted_bytes = fernet.decrypt(encrypted)
     return np.frombuffer(decrypted_bytes, dtype=np.float64)
 
+
+# ─── User Enrollment ──────────────────────────────────────────────────────
 
 def enroll_user(user_id: str, display_name: str, face_images: List[np.ndarray],
                 voiceprint: Optional[np.ndarray] = None) -> bool:
     """
     Enroll a new user by averaging embeddings from multiple face images.
+
+    All data is encrypted before storage:
+      - user_id → HMAC hash (for lookup) + Fernet encrypted (for retrieval)
+      - display_name → Fernet encrypted
+      - face embedding → Fernet encrypted (averaged from multiple images)
+      - voiceprint → Fernet encrypted (optional)
 
     Args:
         user_id: Unique identifier for the user.
@@ -196,11 +260,12 @@ def enroll_user(user_id: str, display_name: str, face_images: List[np.ndarray],
 
     # Average the embeddings for robustness
     avg_embedding = np.mean(embeddings, axis=0)
-    encrypted = encrypt_embedding(avg_embedding)
+    encrypted_emb = encrypt_embedding(avg_embedding)
 
+    # Encrypt voiceprint if provided
     encrypted_vp = None
     if voiceprint is not None:
-        fernet = _get_fernet()
+        fernet = get_fernet()
         if isinstance(voiceprint, np.ndarray):
             vp_bytes = voiceprint.astype(np.float32).tobytes()
         elif isinstance(voiceprint, bytes):
@@ -208,33 +273,57 @@ def enroll_user(user_id: str, display_name: str, face_images: List[np.ndarray],
         else:
             vp_bytes = bytes(voiceprint)
         encrypted_vp = fernet.encrypt(vp_bytes)
-        print(f"[ENROLL] Voiceprint stored: {len(vp_bytes)} bytes")
+        print(f"[ENROLL] Voiceprint stored: {len(vp_bytes)} bytes (encrypted)")
+
+    # Encrypt user metadata
+    uid_hash = hmac_hash(user_id, "user_id")
+    encrypted_uid = encrypt_field(user_id)
+    encrypted_dname = encrypt_field(display_name)
 
     engine = _get_engine()
+    _migrate_if_needed(engine)
+
     with Session(engine) as session:
-        existing = session.query(EnrolledUser).filter_by(user_id=user_id).first()
+        # Look up by HMAC hash (no plaintext comparison)
+        existing = session.query(EnrolledUser).filter_by(user_id_hash=uid_hash).first()
+
+        # Also check legacy plaintext for backward compatibility
+        if existing is None:
+            existing = session.query(EnrolledUser).filter_by(user_id=user_id).first()
+
         if existing:
-            existing.encrypted_embedding = encrypted
-            existing.display_name = display_name
+            existing.user_id_hash = uid_hash
+            existing.encrypted_user_id = encrypted_uid
+            existing.encrypted_display_name = encrypted_dname
+            existing.encrypted_embedding = encrypted_emb
+            existing.user_id = None  # Clear any legacy plaintext
+            existing.display_name = None
             if encrypted_vp:
                 existing.encrypted_voiceprint = encrypted_vp
-            print(f"[INFO] Updated existing enrollment for '{user_id}'.")
+            print(f"[INFO] Updated existing enrollment for user (HMAC:{uid_hash[:12]}...).")
         else:
             user = EnrolledUser(
-                user_id=user_id,
-                display_name=display_name,
-                encrypted_embedding=encrypted,
-                encrypted_voiceprint=encrypted_vp
+                user_id=None,  # No plaintext storage
+                display_name=None,
+                user_id_hash=uid_hash,
+                encrypted_user_id=encrypted_uid,
+                encrypted_display_name=encrypted_dname,
+                encrypted_embedding=encrypted_emb,
+                encrypted_voiceprint=encrypted_vp,
             )
             session.add(user)
-            print(f"[INFO] Enrolled new user '{user_id}'.")
+            print(f"[INFO] Enrolled new user (HMAC:{uid_hash[:12]}...).")
         session.commit()
     return True
 
 
+# ─── Face Matching ─────────────────────────────────────────────────────────
+
 def match_face(live_embedding: np.ndarray) -> Optional[Tuple[str, str, float]]:
     """
     Match a live face embedding against all enrolled users.
+
+    Decrypts user data only in memory — never persisted as plaintext.
 
     Args:
         live_embedding: 128-d face embedding from the live capture.
@@ -244,6 +333,7 @@ def match_face(live_embedding: np.ndarray) -> Optional[Tuple[str, str, float]]:
         below the threshold.
     """
     engine = _get_engine()
+    _migrate_if_needed(engine)
     best_match: Optional[Tuple[str, str, float]] = None
     best_distance = float("inf")
 
@@ -260,9 +350,19 @@ def match_face(live_embedding: np.ndarray) -> Optional[Tuple[str, str, float]]:
 
                 if distance < best_distance:
                     best_distance = distance
-                    best_match = (user.user_id, user.display_name, distance)
+
+                    # Decrypt user metadata in memory only
+                    if user.encrypted_user_id:
+                        uid = decrypt_field(user.encrypted_user_id)
+                        dname = decrypt_field(user.encrypted_display_name)
+                    else:
+                        # Legacy fallback
+                        uid = user.user_id or "unknown"
+                        dname = user.display_name or uid
+
+                    best_match = (uid, dname, distance)
             except Exception as e:
-                print(f"[WARN] Could not decrypt embedding for user '{user.user_id}': {e}")
+                print(f"[WARN] Could not process user record (id={user.id}): {e}")
                 continue
 
     if best_match and best_match[2] <= config.FACE_MATCH_THRESHOLD:
@@ -273,36 +373,55 @@ def match_face(live_embedding: np.ndarray) -> Optional[Tuple[str, str, float]]:
 
 def get_live_embedding(frame: np.ndarray) -> Optional[np.ndarray]:
     """Extract face embedding from a live camera frame."""
-    # Downscale large frames to prevent dlib crashes
-    h, w = frame.shape[:2]
-    max_dim = 640
-    if max(h, w) > max_dim:
-        scale = max_dim / max(h, w)
-        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-    rgb = np.ascontiguousarray(frame[:, :, ::-1])  # BGR to RGB, force C-contiguous
-    encodings = face_recognition.face_encodings(rgb, model=config.FACE_ENCODING_MODEL)
-    if encodings:
-        return encodings[0]
+    try:
+        # Downscale large frames to prevent dlib crashes
+        h, w = frame.shape[:2]
+        max_dim = 640
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        rgb = np.ascontiguousarray(frame[:, :, ::-1])  # BGR to RGB, force C-contiguous
+        encodings = face_recognition.face_encodings(rgb, model=config.FACE_ENCODING_MODEL)
+        if encodings:
+            return encodings[0]
+    except Exception as e:
+        print(f"[ERROR] get_live_embedding failed: {e}")
     return None
 
-def check_user_exists(user_id: str) -> bool:
-    """Check if a given user_id is already enrolled."""
-    engine = _get_engine()
-    with Session(engine) as session:
-        return session.query(EnrolledUser).filter_by(user_id=user_id).first() is not None
 
+def check_user_exists(user_id: str) -> bool:
+    """Check if a given user_id is already enrolled (using HMAC lookup)."""
+    engine = _get_engine()
+    _migrate_if_needed(engine)
+    uid_hash = hmac_hash(user_id, "user_id")
+    with Session(engine) as session:
+        # Check new encrypted format
+        found = session.query(EnrolledUser).filter_by(user_id_hash=uid_hash).first()
+        if found:
+            return True
+        # Check legacy plaintext format
+        found = session.query(EnrolledUser).filter_by(user_id=user_id).first()
+        return found is not None
 
 
 def get_user_voiceprint(user_id: str) -> Optional[np.ndarray]:
     """Retrieve and decrypt a user's stored voiceprint (256-dim float32 embedding)."""
     engine = _get_engine()
+    _migrate_if_needed(engine)
+    uid_hash = hmac_hash(user_id, "user_id")
+
     with Session(engine) as session:
-        user = session.query(EnrolledUser).filter_by(user_id=user_id).first()
+        # Try new HMAC lookup first
+        user = session.query(EnrolledUser).filter_by(user_id_hash=uid_hash).first()
+        # Fallback to legacy
+        if user is None:
+            user = session.query(EnrolledUser).filter_by(user_id=user_id).first()
+
         if user and user.encrypted_voiceprint:
-            fernet = _get_fernet()
+            fernet = get_fernet()
             decrypted = fernet.decrypt(user.encrypted_voiceprint)
             vp = np.frombuffer(decrypted, dtype=np.float32).copy()
-            print(f"[VOICE] Retrieved voiceprint for '{user_id}': shape={vp.shape}")
+            print(f"[VOICE] Retrieved voiceprint: shape={vp.shape}")
             return vp
     return None
 
