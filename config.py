@@ -69,6 +69,11 @@ VOICE_CHALLENGE_PHRASES: List[str] = [
 VOICE_FUZZY_MATCH_RATIO: float = 0.85      # difflib.SequenceMatcher ratio threshold
 VOICE_LISTEN_TIMEOUT: float = 5.0          # Seconds to wait for speech
 VOICE_PHRASE_TIMEOUT: float = 10.0         # Max duration of the spoken phrase
+VOICE_SPEAKER_THRESHOLD: float = 0.78      # Cosine similarity threshold for voiceprint match
+                                            # 0.55 = too lax (friends can bypass)
+                                            # 0.78 = strict (rejects most impostors)
+                                            # 0.85+ = very strict (may reject legitimate users in noisy environments)
+VOICE_PHRASE_MATCH_RATIO: float = 0.6      # Minimum word overlap ratio for phrase verification
 
 # ─── Session Token (NEW-2) ──────────────────────────────────────────────────
 SESSION_TOKEN_BYTES: int = 32              # secrets.token_hex(32) → 64-char hex string

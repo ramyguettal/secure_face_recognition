@@ -57,12 +57,14 @@ class BlinkDetection:
 
     def _get_ear_from_frame(self, frame: np.ndarray) -> Optional[float]:
         """Extract EAR from a single frame. Returns None if no face/eyes found."""
+        from modules.camera import _dlib_lock
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # Use full resolution for better landmark accuracy
-        locations = face_recognition.face_locations(rgb, model="hog")
-        if not locations:
-            return None
-        landmarks = face_recognition.face_landmarks(rgb, face_locations=locations)
+        with _dlib_lock:
+            locations = face_recognition.face_locations(rgb, model="hog")
+            if not locations:
+                return None
+            landmarks = face_recognition.face_landmarks(rgb, face_locations=locations)
         if not landmarks:
             return None
         lm = landmarks[0]
@@ -107,13 +109,15 @@ class BlinkDetection:
             # Downscale for speed during calibration
             small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb, model="hog")
-            if locations:
-                landmarks = face_recognition.face_landmarks(rgb, face_locations=locations)
-                if landmarks:
-                    ear = self._compute_both_ears(landmarks[0])
-                    if ear is not None:
-                        baseline_ears.append(ear)
+            from modules.camera import _dlib_lock
+            with _dlib_lock:
+                locations = face_recognition.face_locations(rgb, model="hog")
+                if locations:
+                    landmarks = face_recognition.face_landmarks(rgb, face_locations=locations)
+            if locations and landmarks:
+                ear = self._compute_both_ears(landmarks[0])
+                if ear is not None:
+                    baseline_ears.append(ear)
 
             if not use_gui:
                 time.sleep(0.01)
@@ -164,24 +168,29 @@ class BlinkDetection:
             # Use downscaled frame for speed
             small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb, model="hog")
+            from modules.camera import _dlib_lock
+            landmarks = None
+            with _dlib_lock:
+                locations = face_recognition.face_locations(rgb, model="hog")
+                if locations:
+                    landmarks_list = face_recognition.face_landmarks(rgb, face_locations=locations)
+                    if landmarks_list:
+                        landmarks = landmarks_list[0]
 
-            if locations:
-                landmarks = face_recognition.face_landmarks(rgb, face_locations=locations)
-                if landmarks:
-                    ear = self._compute_both_ears(landmarks[0])
-                    if ear is not None:
-                        ear_history.append(ear)
+            if landmarks:
+                ear = self._compute_both_ears(landmarks)
+                if ear is not None:
+                    ear_history.append(ear)
 
-                        # State machine: detect close then open
-                        if ear < blink_threshold:
-                            eyes_closed = True
-                        elif eyes_closed and ear > blink_threshold:
-                            # Eyes were closed and now opened → blink!
-                            blink_detected = True
-                            print(f"[BLINK] Blink detected! EAR dropped to "
-                                  f"{min(ear_history[-5:]):.3f} then recovered to {ear:.3f}")
-                            break
+                    # State machine: detect close then open
+                    if ear < blink_threshold:
+                        eyes_closed = True
+                    elif eyes_closed and ear > blink_threshold:
+                        # Eyes were closed and now opened → blink!
+                        blink_detected = True
+                        print(f"[BLINK] Blink detected! EAR dropped to "
+                              f"{min(ear_history[-5:]):.3f} then recovered to {ear:.3f}")
+                        break
 
             if not use_gui:
                 display = frame.copy()

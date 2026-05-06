@@ -1,3 +1,0 @@
-# Placeholder — place pre-trained anti-spoofing model weights here.
-# Expected file: anti_spoof.onnx (ONNX format)
-# If no model is present, the system uses texture-based analysis instead.

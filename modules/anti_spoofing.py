@@ -232,22 +232,17 @@ if __name__ == "__main__":
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('c'):
-            # Simple face detection for test
-            import mediapipe as mp_
-            fd = mp_.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            res = fd.process(rgb)
-            if res.detections:
-                det = res.detections[0]
-                bb = det.location_data.relative_bounding_box
-                fh, fw = frame.shape[:2]
-                bbox = (int(bb.xmin * fw), int(bb.ymin * fh),
-                        int(bb.width * fw), int(bb.height * fh))
+            # Simple face detection for test using OpenCV cascade
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+            if len(faces) > 0:
+                (x, y, w, h) = faces[0]
+                bbox = (x, y, w, h)
                 is_real, conf, reason = pad.check_liveness(frame, bbox)
                 print(f"  Real: {is_real} | Confidence: {conf:.3f} | Reason: {reason}")
             else:
                 print("  No face detected.")
-            fd.close()
 
         elif key == ord('q'):
             break

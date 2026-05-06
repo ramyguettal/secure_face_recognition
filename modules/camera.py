@@ -10,14 +10,24 @@ import os
 import cv2
 import numpy as np
 import socket
+import threading
 from typing import Optional, Tuple, Union, List
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 import face_recognition
 
+# Global lock to serialize all dlib C++ calls (face_locations / face_encodings).
+# dlib is NOT thread-safe; concurrent calls from different threads cause segfaults.
+_dlib_lock = threading.Lock()
+
+
 class CameraCapture:
-    """Manages webcam access (local or external IP) and face detection."""
+    """Manages webcam access (local or external IP) and face detection.
+    
+    Features a threaded frame grabber that continuously reads frames in the
+    background, so read_frame() returns instantly and never blocks the GUI.
+    """
 
     def __init__(self, camera_source: Union[int, str] = config.CAMERA_INDEX) -> None:
         """
@@ -30,6 +40,12 @@ class CameraCapture:
         self.is_external = isinstance(camera_source, str)
         self.is_droidcam = False
         self.droidcam_session: Optional[requests.Session] = None
+
+        # Threaded frame grabber state
+        self._frame_thread: Optional[threading.Thread] = None
+        self._frame_lock = threading.Lock()    # Protects _latest_frame
+        self._latest_frame: Optional[np.ndarray] = None
+        self._thread_running = False
 
     @staticmethod
     def build_external_urls(ip: str, port: str) -> List[str]:
@@ -109,6 +125,9 @@ class CameraCapture:
             actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
             
             print(f"[INFO] Camera opened successfully. Resolution: {actual_width}x{actual_height} @ {actual_fps:.1f} FPS")
+
+            # Start the threaded frame grabber for smooth video
+            self._start_frame_thread()
             return True
         except Exception as e:
             print(f"[ERROR] Camera initialization failed: {e}")
@@ -230,30 +249,84 @@ class CameraCapture:
         print("[ERROR] No working local cameras found.")
         return None
 
-    def read_frame(self) -> Optional[np.ndarray]:
-        """Read a single frame from the camera."""
+    # ─── Threaded Frame Grabber ────────────────────────────────────────────
+
+    def _start_frame_thread(self) -> None:
+        """Start the background thread that continuously grabs frames."""
+        if self._thread_running:
+            return
+        self._thread_running = True
+        self._frame_thread = threading.Thread(target=self._frame_grabber_loop, daemon=True)
+        self._frame_thread.start()
+        print("[CAMERA] Threaded frame grabber started.")
+
+    def _stop_frame_thread(self) -> None:
+        """Stop the background frame grabber thread."""
+        self._thread_running = False
+        if self._frame_thread is not None:
+            self._frame_thread.join(timeout=2.0)
+            self._frame_thread = None
+        with self._frame_lock:
+            self._latest_frame = None
+        print("[CAMERA] Threaded frame grabber stopped.")
+
+    def _frame_grabber_loop(self) -> None:
+        """Background loop: continuously reads frames from the camera hardware.
+        
+        This runs in its own thread so that read_frame() never blocks the GUI.
+        The loop targets ~30fps with adaptive sleep.
+        """
+        while self._thread_running:
+            try:
+                frame = self._read_frame_raw()
+                if frame is not None:
+                    with self._frame_lock:
+                        self._latest_frame = frame
+            except Exception as e:
+                print(f"[CAMERA] Frame grabber error: {e}")
+            # ~30fps target: sleep just enough to yield CPU
+            import time
+            time.sleep(0.005)
+
+    def _read_frame_raw(self) -> Optional[np.ndarray]:
+        """Low-level frame read from hardware. Called only by the grabber thread."""
         if self.is_droidcam:
             frame = self._read_droidcam_frame()
             if frame is not None:
                 frame = cv2.flip(frame, 1)
                 return frame
             return None
-            
+
         if self.cap is None or not self.cap.isOpened():
             return None
 
-        # Flush stale buffered frames to ensure fresh capture
-        # This is important for both local and external cameras
-        self.cap.grab()  # discard buffered frame
-        self.cap.grab()  # discard another
-
+        # Single grab to flush the internal buffer, then read
+        self.cap.grab()
         ret, frame = self.cap.read()
         if not ret or frame is None:
             return None
-        
+
+        # Force C-contiguous layout so downstream dlib calls never hit bad memory
+        frame = np.ascontiguousarray(frame)
+
         # Mirror the frame (Left-to-Right inversion)
         frame = cv2.flip(frame, 1)
         return frame
+
+    def read_frame(self) -> Optional[np.ndarray]:
+        """Return the latest frame from the threaded grabber.
+        
+        This method is NON-BLOCKING — it returns instantly with a copy of
+        the most recent frame. If the grabber thread hasn't produced a frame
+        yet, falls back to a direct synchronous read.
+        """
+        # Fast path: return cached frame from the background thread
+        with self._frame_lock:
+            if self._latest_frame is not None:
+                return self._latest_frame.copy()
+
+        # Fallback: thread not running yet, do a direct read
+        return self._read_frame_raw()
 
     def detect_face(self, frame: np.ndarray) -> Optional[Tuple[np.ndarray, Tuple[int, int, int, int]]]:
         """
@@ -262,13 +335,14 @@ class CameraCapture:
         """
         try:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # Ensure the array is C-contiguous to prevent dlib segfaults
             rgb_frame = np.ascontiguousarray(rgb_frame)
             
             # We process a highly compressed version internally to be super fast
             small_frame = cv2.resize(rgb_frame, (0, 0), fx=0.5, fy=0.5)
             
-            locations = face_recognition.face_locations(small_frame, model="hog")
+            # Acquire lock — dlib C++ is not thread-safe
+            with _dlib_lock:
+                locations = face_recognition.face_locations(small_frame, model="hog")
             if locations:
                 top, right, bottom, left = locations[0]
                 # scale back up
@@ -332,7 +406,10 @@ class CameraCapture:
         return None
 
     def release(self) -> None:
-        """Release the camera and close windows."""
+        """Release the camera, stop the frame grabber, and close windows."""
+        # Stop the background thread first
+        self._stop_frame_thread()
+
         if self.droidcam_session is not None:
             try:
                 self.droidcam_session.close()
@@ -343,7 +420,10 @@ class CameraCapture:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass  # Headless OpenCV build
 
 
 if __name__ == "__main__":

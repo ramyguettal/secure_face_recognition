@@ -244,7 +244,10 @@ def enroll_user(user_id: str, display_name: str, face_images: List[np.ndarray],
 
             rgb = np.ascontiguousarray(img[:, :, ::-1])  # BGR to RGB, force C-contiguous
             print(f"[ENROLL] Image {idx+1}/{len(face_images)}: extracting encoding...")
-            encs = face_recognition.face_encodings(rgb, model=config.FACE_ENCODING_MODEL)
+            # Acquire lock — dlib C++ is not thread-safe
+            from modules.camera import _dlib_lock
+            with _dlib_lock:
+                encs = face_recognition.face_encodings(rgb, model=config.FACE_ENCODING_MODEL)
             if encs:
                 embeddings.append(encs[0])
                 print(f"[ENROLL] Image {idx+1}: encoding extracted OK")
@@ -374,6 +377,9 @@ def match_face(live_embedding: np.ndarray) -> Optional[Tuple[str, str, float]]:
 def get_live_embedding(frame: np.ndarray) -> Optional[np.ndarray]:
     """Extract face embedding from a live camera frame."""
     try:
+        # Import the shared dlib lock to prevent concurrent C++ calls
+        from modules.camera import _dlib_lock
+
         # Downscale large frames to prevent dlib crashes
         h, w = frame.shape[:2]
         max_dim = 640
@@ -381,7 +387,10 @@ def get_live_embedding(frame: np.ndarray) -> Optional[np.ndarray]:
             scale = max_dim / max(h, w)
             frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
         rgb = np.ascontiguousarray(frame[:, :, ::-1])  # BGR to RGB, force C-contiguous
-        encodings = face_recognition.face_encodings(rgb, model=config.FACE_ENCODING_MODEL)
+
+        # Acquire lock — dlib C++ is not thread-safe
+        with _dlib_lock:
+            encodings = face_recognition.face_encodings(rgb, model=config.FACE_ENCODING_MODEL)
         if encodings:
             return encodings[0]
     except Exception as e:

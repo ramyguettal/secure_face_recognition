@@ -120,7 +120,9 @@ class AIVoiceBot:
 
             if not hasattr(self, '_whisper_model'):
                 print("[VOICE BOT] Loading Whisper model (base)...")
-                self._whisper_model = whisper.load_model("base")
+                # Force CPU — RTX 5070 (sm_120 / Blackwell) not yet supported
+                # by stable PyTorch CUDA. Remove device="cpu" once supported.
+                self._whisper_model = whisper.load_model("base", device="cpu")
 
             # Load WAV with scipy (no ffmpeg needed)
             sr_orig, data = wf.read(filename)

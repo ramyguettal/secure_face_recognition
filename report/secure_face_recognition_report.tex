@@ -1,0 +1,196 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{caption}
+
+% Custom Colors for Placeholders
+\definecolor{placeholderbg}{HTML}{EEEEEE}
+
+\title{
+    \vspace*{2cm}
+    \Huge\textbf{Secure Face Authentication System}\\ 
+    \vspace{1cm}
+    \Large\textbf{Academic Project Report: Architecture, Security, and Cryptography}\\
+    \vspace{2cm}
+}
+
+\author{
+    \textbf{Group 1}\\
+    \vspace{0.5cm}\\
+    \textbf{Team Leader:}\\
+    Mohamed Ayoub Belhimer\\
+    \vspace{0.5cm}\\
+    \textbf{Team Members:}\\
+    Mohamed Ramy Guettal\\
+    Nasrellah Kherroubi\\
+    Nour Tliba\\
+    Mokhlis Yacine Bouyahia\\
+    Imad Eddine Smail
+}
+\date{\vspace{2cm}\today}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\newpage
+
+\tableofcontents
+\newpage
+
+\section{Abstract}
+This document provides a comprehensive technical overview and academic report of the \textbf{Secure Face Authentication System}. The project represents an advanced, multi-layered biometric authentication pipeline that integrates continuous facial recognition, multi-modal liveness detection (anti-spoofing, head movement, blink detection), and acoustic speaker verification. Beyond biometric precision, the system places a paramount emphasis on data-at-rest security through AES-128 cryptography, zero-persistence memory buffers, and secure audit logging. This report deeply explores the theoretical models, architectural workflows, encryption mechanisms, and the threat model mitigation strategies implemented by the system.
+
+\section{Introduction}
+Modern biometric systems often suffer from two critical vulnerabilities: susceptibility to Presentation Attack Instruments (PAIs) such as photographs, 3D masks, or video replays, and the catastrophic exposure of stored biometric templates in the event of a database breach. Traditional systems treat biometrics as usernames rather than passwords, leaving systems vulnerable once biometric data is compromised.
+
+This project was developed to mitigate both attack vectors simultaneously. By enforcing a strict, randomized multi-step authentication pipeline, the system verifies not only geometric identity but also biological liveness in real-time. Concurrently, a robust cryptography layer ensures that no personally identifiable information (PII) or raw biometric buffers ever persist on disk in plaintext.
+
+\begin{figure}[H]
+    \centering
+    \colorbox{placeholderbg}{\parbox{0.8\textwidth}{\centering \vspace{3cm} \textit{[INSERT SCREENSHOT: Main GUI / Home Screen]} \vspace{3cm}}}
+    \caption{Main Interface of the Secure Face Authentication System}
+    \label{fig:main_gui}
+\end{figure}
+
+\section{System Architecture}
+The system architecture follows a modular, multi-threaded design. The Graphical User Interface (GUI) is decoupled from the heavy computational pipelines (Deep Learning models) using background threads and thread-safe queues. This ensures that the camera feed operates continuously at high frames-per-second (FPS) via a Threaded Frame Grabber, preventing UI freezes while the CPU/GPU calculates high-dimensional embeddings.
+
+\subsection{Thread-Safe Primitive Management}
+Because Python's Global Interpreter Lock (GIL) and OpenCV's hardware access are highly volatile in concurrent environments, the system employs a global \texttt{\_dlib\_lock} (mutex). This strict serialization ensures that C++ extensions (like \texttt{dlib}) do not cause segmentation faults when accessed simultaneously by the live camera feed and the background enrollment/authentication processors.
+
+\section{Biometric Pipeline \& Liveness Detection}
+The architecture relies on several state-of-the-art machine learning models and computer vision heuristics, distributed across independent modules. Identity is never trusted based on a single frame; it must be proven through a sequence of biological challenges.
+
+\begin{figure}[H]
+    \centering
+    \colorbox{placeholderbg}{\parbox{0.8\textwidth}{\centering \vspace{3cm} \textit{[INSERT SCREENSHOT: Authentication Process showing Bounding Boxes/Landmarks]} \vspace{3cm}}}
+    \caption{Live Camera Feed highlighting Face Detection and Status}
+    \label{fig:auth_feed}
+\end{figure}
+
+\subsection{Identity Verification (dlib)}
+The core identity verification relies on the \texttt{face\_recognition} library, utilizing \texttt{dlib}'s C++ ecosystem.
+\begin{itemize}
+    \item \textbf{Detection \& Extraction:} It utilizes a Histogram of Oriented Gradients (HOG) combined with a linear classifier for face bounding box detection. The cropped face is passed through a ResNet-based Convolutional Neural Network (CNN) that generates a 128-dimensional continuous vector (embedding) representing facial geometry.
+    \item \textbf{Distance Metric:} The Euclidean distance between the live embedding and the stored, decrypted enrollment embeddings is computed in RAM. A strict distance threshold (below $0.5$) classifies the embedding as a positive match.
+\end{itemize}
+
+\subsection{Static Anti-Spoofing (Texture \& Light)}
+Before any dynamic challenges are issued, the system analyzes the texture and light emission of the captured face to immediately reject printed photos or digital screens.
+\begin{itemize}
+    \item \textbf{Texture Analysis (GLCM):} Evaluates the Gray-Level Co-occurrence Matrix to detect artificial textures (e.g., paper grain, printer ink micro-patterns, or pixel grids).
+    \item \textbf{Luminosity Variance:} Measures localized color variances and specular highlights to detect the unnatural glow emitted by LCD/OLED screens.
+\end{itemize}
+
+\subsection{Dynamic Head Movement Tracking (MediaPipe)}
+To defeat static 3D masks or high-quality still photos, the system issues a randomized physical challenge measuring real-time rotational deltas.
+\begin{itemize}
+    \item \textbf{Mechanism:} Utilizes \texttt{dlib} facial landmarks to map key biological points (nose tip, eye centers, chin). 
+    \item \textbf{Delta Pose Estimation:} The system establishes a baseline neutral pose and computes the real-time \textit{Yaw} and \textit{Pitch} deltas. The user must rotate their head in a randomly dictated direction (Left, Right, Up, Down).
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \colorbox{placeholderbg}{\parbox{0.8\textwidth}{\centering \vspace{3cm} \textit{[INSERT SCREENSHOT: Head Movement Challenge Prompt (e.g. "Turn Left")]} \vspace{3cm}}}
+    \caption{Dynamic Head Movement Challenge Interface}
+    \label{fig:head_challenge}
+\end{figure}
+
+\subsection{Blink Detection via Eye Aspect Ratio (EAR)}
+To defeat looped video replays, the system requests randomized blink sequences.
+\begin{itemize}
+    \item \textbf{Mechanism:} The Eye Aspect Ratio (EAR) is calculated using the vertical and horizontal Euclidean distances between the eyelid landmarks. A sudden drop in EAR signifies a blink. Because the prompt timing is randomized, pre-recorded videos cannot perfectly synchronize with the system's request.
+\end{itemize}
+
+\subsection{Acoustic Challenge (Whisper STT \& Resemblyzer)}
+A dual-layer acoustic challenge defends against deepfake audio and replay attacks.
+\begin{itemize}
+    \item \textbf{Semantic Verification (Whisper):} The system dictates a random passphrase. OpenAI's Whisper model transcribes the captured audio. If the text does not match the prompt, the system detects a replay of an old voice sample.
+    \item \textbf{Speaker Verification (Resemblyzer):} A deep learning model converts the audio waveform into a 256-dimensional d-vector (voiceprint). The cosine similarity (threshold $> 0.80$) between the live utterance and the enrolled voiceprint confirms the biological speaker's identity.
+\end{itemize}
+
+\section{Cryptographic \& Data Security Architecture}
+The cornerstone of this project is its uncompromising approach to data-at-rest security. The system employs a strict "Zero-Persistence" and "Data-at-Rest Encryption" philosophy.
+
+\subsection{Key Management \& OS-Level Protection}
+\begin{itemize}
+    \item \textbf{Symmetric Cryptography:} The system generates a highly secure Fernet key, which is an implementation of AES-128 in Cipher Block Chaining (CBC) mode, combined with a SHA256 HMAC for payload authentication and integrity verification.
+    \item \textbf{Storage Security:} The key is saved as a hidden file (\texttt{.face\_key}). On Windows environments, the system executes \texttt{icacls} commands to strip inherited NTFS permissions and bind access strictly to the current OS user profile. This prevents other users on the same machine from accessing the key.
+\end{itemize}
+
+\subsection{Database Encryption Strategy}
+The SQLite database (\texttt{face\_db.db}) contains absolute zero plaintext PII.
+\begin{itemize}
+    \item \textbf{Irreversible Identity Hashes:} Instead of storing \texttt{user\_id} in plaintext, the system generates an HMAC-SHA256 hash. During login, the live input is hashed and compared against the database. If an attacker steals the database, they cannot reverse-engineer the user IDs.
+    \item \textbf{Encrypted Biometric Payloads:} The user's \texttt{display\_name}, the 128-dimensional face embeddings, and the 256-dimensional voiceprint are all serialized, heavily AES-encrypted using the Fernet key, and stored as BLOBs. 
+\end{itemize}
+
+\subsection{Zero-Persistence Memory Buffers (DoD 5220.22-M)}
+Raw biometric artifacts, such as audio recordings (\texttt{.wav}), pose a massive security risk if left on a storage drive, even in a temporary folder.
+\begin{itemize}
+    \item All temporary data is routed to a hidden \texttt{.secure\_tmp} directory.
+    \item Immediately following processing (e.g., STT extraction), the file undergoes a \textbf{Department of Defense (DoD) 5220.22-M} standard wipe. The system performs a 3-pass overwrite (Random bytes $\rightarrow$ Random bytes $\rightarrow$ Zero-fill) before OS-level deletion. This permanently destroys magnetic or solid-state remnants of the user's voice.
+\end{itemize}
+
+\subsection{Encrypted Audit Logging}
+System access logs (\texttt{audit.log.enc}) record timestamps, IP addresses, hashes, and failure reasons. Each line in the JSON-lines log file is an independently encrypted Fernet token. An attacker stealing the log file gains zero intelligence regarding system traffic or enrolled users.
+
+\section{Workflows}
+
+\subsection{Asynchronous Enrollment Pipeline (Spatial Ring Capture)}
+The enrollment process was designed for both security and modern User Experience (UX), mimicking fluid systems like Apple Face ID.
+\begin{enumerate}
+    \item \textbf{Baseline Calibration:} The user looks straight at the camera. The system calibrates a neutral geometric baseline.
+    \item \textbf{Spatial Ring Scanning:} An overlay of a 5-segment circular ring appears. The user rotates their head. The system automatically detects the relative yaw/pitch deltas and captures frames for Center, Left, Right, Up, and Down, illuminating the ring segments in green upon success.
+    \item \textbf{Acoustic Capture:} The user answers a random question to generate a baseline voiceprint.
+    \item \textbf{Cryptographic Commit:} The GUI transitions to a secure loading overlay while embeddings are averaged, voiceprints extracted, temp files securely wiped, and the encrypted payload is committed to the database.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \colorbox{placeholderbg}{\parbox{0.8\textwidth}{\centering \vspace{3cm} \textit{[INSERT SCREENSHOT: Circular Ring Enrollment Interface]} \vspace{3cm}}}
+    \caption{Spatial Ring Capture during the Enrollment Phase}
+    \label{fig:enrollment_ring}
+\end{figure}
+
+\subsection{Multi-Stage Authentication Pipeline}
+\begin{enumerate}
+    \item \textbf{Face Recognition:} Camera captures frame $\rightarrow$ Embeddings decrypted in RAM $\rightarrow$ Euclidean distance match.
+    \item \textbf{Rate Limiting Gate:} Exponential backoff logic prevents rapid brute-forcing of the camera feed.
+    \item \textbf{Anti-Spoofing:} Texture and screen glow are analyzed.
+    \item \textbf{Head Challenge:} Random direction prompt.
+    \item \textbf{Blink Challenge:} Random blink prompt.
+    \item \textbf{Voice Challenge:} Random passphrase prompt $\rightarrow$ Whisper STT verifies text $\rightarrow$ Resemblyzer verifies speaker identity.
+    \item \textbf{Session Token:} A time-limited, encrypted session token is generated upon complete pipeline success.
+\end{enumerate}
+
+\section{Threat Model \& Defended Attack Vectors}
+\begin{itemize}
+    \item \textbf{Printed Photo Attack:} Defeated by texture analysis, GLCM, and the blink/head movement challenge.
+    \item \textbf{Smartphone Screen / iPad Replay:} Defeated by LCD screen glow detection and randomized physical challenges (pre-recorded videos cannot predict the random directions).
+    \item \textbf{Audio Replay Attack:} Defeated by the randomized passphrase generation. A recorded voice saying "Hello" will fail if the system requests "The sky is blue".
+    \item \textbf{Voice Deepfake / Cloning:} Defeated by the Resemblyzer d-vector voiceprint, which detects acoustic anomalies and spectrogram structures not present in synthetic cloned audio.
+    \item \textbf{Database \& Log Theft:} Defeated by AES-128 encryption. Without the OS-protected \texttt{.face\_key}, the database and logs are indistinguishable from random noise.
+\end{itemize}
+
+\section{Limitations \& Future Work}
+While highly secure, the system exhibits architectural constraints:
+\begin{enumerate}
+    \item \textbf{Hardware Processing Bottlenecks:} Deep learning models (Whisper, Resemblyzer, ResNet) are computationally expensive. On CPU-only environments, authentication latency is noticeable. GPU acceleration (CUDA) eliminates this bottleneck but introduces strict hardware dependencies.
+    \item \textbf{Environmental Sensitivity:} The \texttt{dlib} face encodings and GLCM texture analysis are highly sensitive to lighting. Severe backlight or extreme darkness can cause false rejections. Infrared (IR) camera integration is recommended for future iterations to solve lighting constraints.
+    \item \textbf{Memory Dumping Risks:} While data-at-rest is secure, a highly privileged attacker who roots the physical machine could theoretically perform memory-dumping attacks to extract the Fernet key from active RAM.
+\end{enumerate}
+
+\section{Conclusion}
+This Secure Face Authentication System represents a rigorous intersection of computer vision, acoustic deep learning, and robust cryptography. By treating biometric data with the strict cryptographic respect usually reserved for passwords, and by enforcing multi-modal liveness checks, the project stands resilient against the vast majority of consumer-level spoofing attempts and physical data extraction attacks. The resulting architecture successfully balances highly secure, zero-persistence processing with a modern, asynchronous user experience.
+
+\end{document}

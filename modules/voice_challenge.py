@@ -31,9 +31,9 @@ class VoiceChallenge:
         self._resemblyzer_available = False
         try:
             from resemblyzer import VoiceEncoder
-            self._encoder = VoiceEncoder()
+            self._encoder = VoiceEncoder(device="cpu")
             self._resemblyzer_available = True
-            print("[VOICE] Speaker verification: ENABLED (resemblyzer loaded)")
+            print("[VOICE] Speaker verification: ENABLED (resemblyzer loaded, device=cpu)")
         except ImportError:
             print("[VOICE] Speaker verification: DISABLED (resemblyzer not installed)")
 

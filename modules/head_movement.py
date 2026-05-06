@@ -108,38 +108,45 @@ class HeadMovementChallenge:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             small_rgb = cv2.resize(rgb, (0, 0), fx=0.5, fy=0.5)
             
-            locations = face_recognition.face_locations(small_rgb, model="hog")
-            if locations:
-                landmarks = face_recognition.face_landmarks(small_rgb, face_locations=locations)
-                if landmarks:
-                    lm = landmarks[0]
-                    if all(k in lm for k in ['nose_tip', 'left_eye', 'right_eye', 'chin']):
-                        yaw, pitch = self._estimate_head_pose_simple(lm)
+            # Acquire lock — dlib C++ is not thread-safe
+            from modules.camera import _dlib_lock
+            landmarks = None
+            with _dlib_lock:
+                locations = face_recognition.face_locations(small_rgb, model="hog")
+                if locations:
+                    landmarks_list = face_recognition.face_landmarks(small_rgb, face_locations=locations)
+                    if landmarks_list:
+                        landmarks = landmarks_list[0]
 
-                        if initial_yaw is None:
-                            initial_yaw = yaw
-                            initial_pitch = pitch
-                            continue
+            if landmarks:
+                lm = landmarks
+                if all(k in lm for k in ['nose_tip', 'left_eye', 'right_eye', 'chin']):
+                    yaw, pitch = self._estimate_head_pose_simple(lm)
 
-                        delta_yaw = yaw - initial_yaw
-                        delta_pitch = pitch - initial_pitch
+                    if initial_yaw is None:
+                        initial_yaw = yaw
+                        initial_pitch = pitch
+                        continue
 
-                        intermediate_readings.append((delta_yaw, delta_pitch))
-                        print(f"[HEAD] delta_yaw={delta_yaw:.1f}  delta_pitch={delta_pitch:.1f}  target={direction}")
+                    delta_yaw = yaw - initial_yaw
+                    delta_pitch = pitch - initial_pitch
 
-                        # Check if the correct movement is detected
-                        if direction == "turn left" and delta_yaw < -config.HEAD_POSE_YAW_THRESHOLD:
-                            challenge_met = True
-                        elif direction == "turn right" and delta_yaw > config.HEAD_POSE_YAW_THRESHOLD:
-                            challenge_met = True
-                        elif direction == "tilt up" and delta_pitch < -config.HEAD_POSE_PITCH_THRESHOLD:
-                            challenge_met = True
-                        elif direction == "tilt down" and delta_pitch > config.HEAD_POSE_PITCH_THRESHOLD:
-                            challenge_met = True
+                    intermediate_readings.append((delta_yaw, delta_pitch))
+                    print(f"[HEAD] delta_yaw={delta_yaw:.1f}  delta_pitch={delta_pitch:.1f}  target={direction}")
 
-                        if challenge_met:
-                            print(f"[HEAD] Challenge MET! delta_yaw={delta_yaw:.1f} delta_pitch={delta_pitch:.1f}")
-                            break
+                    # Check if the correct movement is detected
+                    if direction == "turn left" and delta_yaw < -config.HEAD_POSE_YAW_THRESHOLD:
+                        challenge_met = True
+                    elif direction == "turn right" and delta_yaw > config.HEAD_POSE_YAW_THRESHOLD:
+                        challenge_met = True
+                    elif direction == "tilt up" and delta_pitch < -config.HEAD_POSE_PITCH_THRESHOLD:
+                        challenge_met = True
+                    elif direction == "tilt down" and delta_pitch > config.HEAD_POSE_PITCH_THRESHOLD:
+                        challenge_met = True
+
+                    if challenge_met:
+                        print(f"[HEAD] Challenge MET! delta_yaw={delta_yaw:.1f} delta_pitch={delta_pitch:.1f}")
+                        break
 
             # Only show OpenCV window in CLI mode
             if not use_gui:
