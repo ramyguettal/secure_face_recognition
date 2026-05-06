@@ -1,4 +1,4 @@
-# 🔐 Secure Face Recognition Authentication System
+#  Secure Face Recognition Authentication System
 
 A multi-layer, secure face recognition authentication system in Python with 6 pipeline steps and 2 added security layers.
 
@@ -21,7 +21,7 @@ Layer 3: Storage      → Encrypted DB, Encrypted Logs, 3-Pass Audio Wiper
 
 ---
 
-## 🔒 Data Security & Privacy (Overhaul)
+##  Data Security & Privacy (Overhaul)
 
 This system implements **Zero-Persistence** for sensitive biometric buffers and **Data-at-Rest Encryption** for all stored profiles:
 

@@ -1,0 +1,134 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{parskip}
+
+\title{\textbf{Secure Face Recognition \& Biometric Authentication System}\\ \Large Comprehensive Technical Report}
+\author{System Architecture \& Security Audit}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Abstract}
+This document provides a comprehensive technical overview of the Secure Face Recognition System. The project is an advanced, multi-layered biometric authentication pipeline that integrates facial recognition, multi-modal liveness detection (anti-spoofing, head movement, blink detection), and acoustic speaker verification. Beyond biometric precision, the system places a paramount emphasis on data-at-rest security through AES-128 encryption, zero-persistence memory buffers, and secure audit logging. This report details the theoretical models, architectural workflows, security mechanics, and inherent limitations of the system.
+
+\section{Introduction}
+Modern biometric systems often suffer from two critical vulnerabilities: susceptibility to Presentation Attack Instruments (PAIs) such as photographs or video replays, and the catastrophic exposure of stored biometric templates in the event of a database breach. 
+
+This project was developed to mitigate both attack vectors simultaneously. By enforcing a strict 6-step authentication pipeline, the system verifies not only identity but also biological liveness. Concurrently, a robust cryptography layer ensures that no personally identifiable information (PII) or raw biometric buffers ever persist on disk in plaintext.
+
+\section{System Models and Modules}
+The architecture relies on several state-of-the-art machine learning models and computer vision heuristics, distributed across independent modules.
+
+\subsection{Face Recognition Module (dlib)}
+The core identity verification relies on the \texttt{face\_recognition} library, which serves as a Python wrapper around \texttt{dlib}'s C++ ecosystem.
+\begin{itemize}
+    \item \textbf{How it works:} It utilizes a Histogram of Oriented Gradients (HOG) combined with a linear classifier for face bounding box detection. Once cropped, the face is passed through a ResNet-based Convolutional Neural Network (CNN) that generates a 128-dimensional continuous vector (embedding) representing facial geometry. 
+    \item \textbf{Matching:} The Euclidean distance between the live embedding and the stored enrollment embedding is computed. A distance below $0.5$ classifies as a match.
+\end{itemize}
+
+\subsection{Anti-Spoofing / Liveness Detection}
+Before identity is accepted, the system analyzes the texture and light emission of the captured face to reject printed photos or digital screens.
+\begin{itemize}
+    \item \textbf{How it works:} The module evaluates the Gray-Level Co-occurrence Matrix (GLCM) to detect artificial textures (like paper grain or pixel grids). It also measures localized color variances to detect the unnatural glow emitted by LCD/OLED screens.
+    \item \textbf{Outcome:} Returns a liveness probability score. Scores below $0.8$ trigger an immediate pipeline short-circuit.
+\end{itemize}
+
+\subsection{Head Movement Challenge (MediaPipe)}
+To defeat static 3D masks or high-quality still photos, the system issues a randomized physical challenge.
+\begin{itemize}
+    \item \textbf{How it works:} Utilizes Google's \texttt{MediaPipe Face Mesh} to map 468 3D facial landmarks. By tracking the relative coordinates of the nose tip against the jawline and eyes, it calculates pitch, yaw, and roll. The user must turn their head in a randomly dictated direction (Left, Right, Up) within a short time window.
+\end{itemize}
+
+\subsection{Blink Detection (EAR)}
+To defeat looped video replays, the system requests randomized blink sequences.
+\begin{itemize}
+    \item \textbf{How it works:} Also utilizing \texttt{MediaPipe}, the Eye Aspect Ratio (EAR) is calculated using the vertical and horizontal distances between the eyelid landmarks. A sudden drop in EAR signifies a blink. Random timing prevents pre-recorded videos from matching the prompt.
+\end{itemize}
+
+\subsection{Voice Challenge (Whisper STT \& Resemblyzer)}
+A dual-layer acoustic challenge to defend against deepfake audio and replay attacks.
+\begin{itemize}
+    \item \textbf{Speech-to-Text (OpenAI Whisper):} The system dictates a random passphrase. Whisper transcribes the captured audio to verify the semantic content matches the challenge (defending against replays of old voice samples).
+    \item \textbf{Speaker Verification (Resemblyzer):} A deep learning model that converts the audio waveform into a 256-dimensional d-vector (voiceprint). The cosine similarity between the live utterance and the enrolled voiceprint confirms the speaker's identity.
+\end{itemize}
+
+\section{Data Security and Encryption Architecture}
+The system employs a strict "Zero-Persistence" and "Data-at-Rest Encryption" philosophy. 
+
+\subsection{Encryption Key Management}
+\begin{itemize}
+    \item \textbf{The Key:} A symmetric Fernet (AES-128 in CBC mode with SHA256 HMAC for authentication) key is generated.
+    \item \textbf{Storage:} The key is saved as a hidden file (\texttt{.face\_key}). On Windows, \texttt{icacls} is utilized to strip inherited permissions and bind access strictly to the current OS owner. The \texttt{.gitignore} prevents it from entering version control.
+\end{itemize}
+
+\subsection{Database Encryption}
+The SQLite database (\texttt{face\_db.db}) contains zero plaintext PII.
+\begin{itemize}
+    \item \textbf{HMAC-SHA256 Lookups:} Instead of storing \texttt{user\_id} in plaintext, the system stores an irreversible HMAC hash. During login, the live input is hashed and compared, ensuring user IDs cannot be extracted by reverse-engineering the database.
+    \item \textbf{Encrypted Payload:} The \texttt{display\_name}, 128-d face embedding, and 256-d voiceprint are all heavily encrypted using the Fernet key before being committed to the database rows.
+\end{itemize}
+
+\subsection{Ephemeral Biometric Buffers}
+Raw audio recordings (\texttt{.wav}) pose a massive security risk if left on disk. 
+\begin{itemize}
+    \item The system writes temporary audio to a hidden \texttt{.secure\_tmp} directory.
+    \item Immediately following STT and Voiceprint extraction, the file undergoes a \textbf{DoD 5220.22-M} standard wipe (3-pass random byte overwrite followed by zero-fill) before OS-level deletion. This destroys any magnetic or solid-state remnants of the user's voice.
+\end{itemize}
+
+\subsection{Encrypted Audit Logging}
+System access logs (\texttt{audit.log.enc}) record IP addresses, user IDs, and failure reasons. Each line in the JSON-lines log file is an independently encrypted Fernet token. An attacker stealing the log file gains zero intelligence.
+
+\section{Workflows}
+
+\subsection{Enrollment Pipeline}
+\begin{enumerate}
+    \item \textbf{Identity Generation:} The system generates a cryptographic UUID (\texttt{USR-XXXX}) and accepts a Display Name.
+    \item \textbf{Visual Capture:} The user is guided through 5 distinct head poses. MediaPipe validates the poses.
+    \item \textbf{Acoustic Capture:} The user answers a random question to provide a baseline voiceprint.
+    \item \textbf{Cryptographic Commit:} Embeddings are averaged, voiceprints are extracted, audio buffers are securely wiped, and the payload is AES-encrypted and committed to the database.
+\end{enumerate}
+
+\subsection{Authentication Pipeline}
+\begin{enumerate}
+    \item \textbf{Face Recognition:} Camera captures frame $\rightarrow$ dlib extracts embedding $\rightarrow$ Database is iterated, decrypting embeddings in RAM to calculate Euclidean distance.
+    \item \textbf{Rate Limiting Gate:} Exponential backoff prevents brute forcing.
+    \item \textbf{Anti-Spoofing:} Texture and screen glow are analyzed.
+    \item \textbf{Head Challenge:} Random direction prompt.
+    \item \textbf{Blink Challenge:} Random blink prompt.
+    \item \textbf{Voice Challenge:} Random passphrase prompt $\rightarrow$ Whisper STT verifies text $\rightarrow$ Resemblyzer verifies speaker.
+    \item \textbf{Session Token:} A time-limited, encrypted session token is generated upon success.
+\end{enumerate}
+
+\section{Defended Attack Vectors}
+\begin{itemize}
+    \item \textbf{Printed Photo Attack:} Defeated by texture analysis, GLCM, and the blink/head movement challenge.
+    \item \textbf{Smartphone Screen / iPad Replay:} Defeated by LCD screen glow detection and randomized physical challenges (pre-recorded videos cannot predict the random directions).
+    \item \textbf{Audio Replay Attack:} Defeated by the random passphrase. A recorded voice saying "Hello" will fail if the system requests "The sky is blue".
+    \item \textbf{Voice Deepfake / Cloning:} Defeated by the Resemblyzer d-vector voiceprint, which detects acoustic anomalies not present in cloned audio.
+    \item \textbf{Database Theft:} Defeated by AES-128 encryption. Without the OS-protected \texttt{.face\_key}, the database is indistinguishable from random noise.
+\end{itemize}
+
+\section{Limitations and "Bad Points"}
+While highly secure, the system exhibits several architectural compromises:
+\begin{enumerate}
+    \item \textbf{Hardware Processing Bottlenecks (CPU vs GPU):} AI models like Whisper and Resemblyzer are computationally heavy. On CPU-only environments, authentication can take 5--10 seconds. GPU acceleration (CUDA) is highly recommended but drastically increases environment setup complexity.
+    \item \textbf{Thread Synchronization (Camera Freezing):} Because OpenCV struggles with multi-threaded concurrent hardware access, the GUI video feed is intentionally paused while the background thread processes challenges. This results in a slightly "stuttery" UX during authentication.
+    \item \textbf{Environmental Sensitivity:} The \texttt{dlib} face encodings and GLCM texture analysis are highly sensitive to lighting. Severe backlight or extreme darkness can cause false rejections.
+    \item \textbf{Local Dependency:} The encryption model relies on local OS file permissions for key security. If the physical machine is rooted, memory-dumping attacks could theoretically extract the Fernet key from active RAM.
+\end{enumerate}
+
+\section{Conclusion}
+This Secure Face Recognition System represents a rigorous intersection of computer vision, acoustic deep learning, and robust cryptography. By treating biometric data with the same cryptographic respect as passwords, and utilizing multi-modal liveness checks, it stands resilient against the vast majority of consumer-level spoofing attempts and physical data extraction attacks.
+
+\end{document}

@@ -18,7 +18,6 @@ from tkinter import ttk, messagebox
 from typing import Optional
 import cv2
 import numpy as np
-import face_recognition
 
 from PIL import Image, ImageTk
 
@@ -1135,84 +1134,66 @@ class SecureFaceAuthApp:
         self._clear()
         self._enroll_feed_running = True
         self._enroll_images = []
-        self._enroll_cancelled = False
-        self._enroll_face_detected = False
-        self._enroll_current_frame = None
+        self._enroll_current_pose = 0
 
-        # Angle-based capture: track which directions have been captured
-        # Each segment covers 72° of the ring (360/5)
-        self._enroll_segments = {
-            "center":  {"captured": False, "color": COLORS["step_pending"]},
-            "right":   {"captured": False, "color": COLORS["step_pending"]},
-            "left":    {"captured": False, "color": COLORS["step_pending"]},
-            "up":      {"captured": False, "color": COLORS["step_pending"]},
-            "down":    {"captured": False, "color": COLORS["step_pending"]},
-        }
-        self._enroll_segment_order = ["center", "right", "left", "up", "down"]
-        self._enroll_current_yaw = 0.0
-        self._enroll_current_pitch = 0.0
+        self._enroll_poses = [
+            "stay in center",
+            "turn right",
+            "turn left",
+            "up",
+            "center again"
+        ]
 
         # ── Top header ──
         top = tk.Frame(self.content, bg=COLORS["bg_dark"])
-        top.pack(side="top", fill="x", padx=20, pady=(16, 4))
-        tk.Label(top, text="📸  Face Enrollment", font=(FONT, 18, "bold"),
+        top.pack(side="top", fill="x", padx=20, pady=(16, 8))
+        tk.Label(top, text="📸  Enrollment Capture", font=(FONT, 18, "bold"),
                  bg=COLORS["bg_dark"], fg=COLORS["text_primary"]).pack(side="left")
+        self.enroll_progress_label = tk.Label(
+            top, text="Photo 1 of 5",
+            font=(FONT, 12), bg=COLORS["bg_dark"], fg=COLORS["accent_purple"])
+        self.enroll_progress_label.pack(side="right")
 
-        # ── Instruction label ──
+        # ── Voice instruction label (large, visible) ──
         self.enroll_pose_label = tk.Label(self.content,
-            text="Look in each direction shown below",
-            font=(FONT, 13, "bold"),
-            bg=COLORS["bg_dark"], fg=COLORS["accent_cyan"])
-        self.enroll_pose_label.pack(side="top", pady=(4, 4))
+            text="🎤  Starting...",
+            font=(FONT, 16, "bold"),
+            bg=COLORS["bg_dark"], fg=COLORS["accent_amber"])
+        self.enroll_pose_label.pack(side="top", pady=(0, 8))
 
-        # ── Direction hint (shows which direction to move next) ──
-        self.enroll_direction_hint = tk.Label(self.content,
-            text="▶  Look straight at the camera to start",
-            font=(FONT, 11),
-            bg=COLORS["bg_dark"], fg=COLORS["text_muted"])
-        self.enroll_direction_hint.pack(side="top", pady=(0, 4))
-
-        # ── Bottom bar ──
+        # ── Bottom bar with Cancel only (no manual capture button) ──
         bot_bar = tk.Frame(self.content, bg=COLORS["bg_dark"])
         bot_bar.pack(side="bottom", fill="x", padx=20, pady=(4, 12))
         GlowButton(bot_bar, "✗  Cancel", lambda: self._cancel_enrollment(),
                    width=140, height=46, bg=COLORS["step_pending"], font_size=11).pack(side="right")
 
-        # ── Segment indicator at the bottom ──
-        seg_frame = tk.Frame(self.content, bg=COLORS["bg_dark"])
-        seg_frame.pack(side="bottom", pady=(4, 4))
-        self._enroll_seg_labels = {}
-        for seg_name in self._enroll_segment_order:
-            lbl = tk.Label(seg_frame, text=f"  ○ {seg_name.capitalize()}  ",
-                           font=(FONT, 10), bg=COLORS["bg_dark"],
-                           fg=COLORS["text_muted"])
-            lbl.pack(side="left", padx=2)
-            self._enroll_seg_labels[seg_name] = lbl
+        self.enroll_captured_label = tk.Label(self.content,
+            text="Captured: 0 / 5",
+            font=(FONT, 11), bg=COLORS["bg_dark"], fg=COLORS["text_secondary"])
+        self.enroll_captured_label.pack(side="bottom", pady=(4, 4))
 
-        # ── Canvas for camera + ring overlay (middle, expanding) ──
+        # ── Camera view (middle, expanding) ──
         mid = tk.Frame(self.content, bg=COLORS["bg_dark"])
         mid.pack(side="top", fill="both", expand=True, padx=20, pady=4)
-
-        self.enroll_canvas = tk.Canvas(mid, bg=COLORS["bg_dark"],
-                                        highlightthickness=0)
-        self.enroll_canvas.pack(fill="both", expand=True)
-
-        # Face status label (shown on canvas)
-        self.enroll_face_status = tk.Label(mid, text="",
+        cam_card = tk.Frame(mid, bg=COLORS["bg_card"],
+                            highlightbackground=COLORS["border"], highlightthickness=1)
+        cam_card.pack(fill="both", expand=True)
+        cam_card.pack_propagate(False)
+        self.enroll_video_label = tk.Label(cam_card, bg=COLORS["bg_dark"])
+        self.enroll_video_label.pack(fill="both", expand=True, padx=8, pady=8)
+        self.enroll_face_status = tk.Label(cam_card, text="No face detected",
                                            font=(FONT, 10, "bold"),
-                                           bg=COLORS["bg_dark"], fg=COLORS["error"])
-        self.enroll_face_status.pack(pady=(4, 0))
+                                           bg=COLORS["bg_card"], fg=COLORS["error"])
+        self.enroll_face_status.pack(pady=(0, 8))
 
-        # Progress label
-        self.enroll_progress_label = tk.Label(mid,
-            text="0 / 5 angles captured",
-            font=(FONT, 11, "bold"), bg=COLORS["bg_dark"], fg=COLORS["accent_purple"])
-        self.enroll_progress_label.pack(pady=(2, 0))
+        self._enroll_face_detected = False
+        self._enroll_current_frame = None
+        self._enroll_cancelled = False
 
-        # ── Start live camera feed with ring overlay ──
+        # Start live camera feed
         self._update_enroll_feed()
 
-        # ── Start background enrollment thread (async voice + angle detection) ──
+        # Start the voice-driven enrollment in a background thread
         threading.Thread(target=self._voice_driven_enroll, daemon=True).start()
 
     def _cancel_enrollment(self):
@@ -1221,132 +1202,86 @@ class SecureFaceAuthApp:
         self._show_home()
 
     def _voice_driven_enroll(self):
-        """Background thread: fast async enrollment with angle-based capture."""
-        # Single async intro — doesn't block
-        voice_bot.speak("look in each direction shown on screen so I can scan your face from all angles")
+        """Background thread: voice-driven enrollment sequence."""
+        total = config.ENROLLMENT_CAPTURE_COUNT
+
+        # ── Opening announcement ──
+        self._gui(self._set_enroll_instruction,
+                  "🎤  please follow me and take pics so we can\n"
+                  "     get to know you next time you try to enter the system")
+        voice_bot.speak_sync(
+            "please follow me and take pics so we can get to know you "
+            "next time you try to enter the system")
 
         if self._enroll_cancelled:
             return
 
-        # Angle thresholds for detection (applied to delta from baseline)
-        YAW_THRESHOLD = 4.0
-        PITCH_THRESHOLD = 4.0
-
-        # ── Phase 1: Calibrate baseline (capture "center" automatically) ──
-        # Wait for a stable face reading to establish neutral yaw/pitch
-        self._gui(self._set_enroll_instruction, "▶  Look straight at the camera")
-        baseline_yaw = None
-        baseline_pitch = None
-        stable_frames = 0
-
-        for _ in range(200):  # ~10 seconds max for calibration
-            if self._enroll_cancelled:
-                return
-            if self._enroll_face_detected:
-                yaw = self._enroll_current_yaw
-                pitch = self._enroll_current_pitch
-                if baseline_yaw is None:
-                    baseline_yaw = yaw
-                    baseline_pitch = pitch
-                    stable_frames = 1
-                else:
-                    # Check if reading is stable (within 2° of running average)
-                    if abs(yaw - baseline_yaw) < 2.0 and abs(pitch - baseline_pitch) < 2.0:
-                        stable_frames += 1
-                        # Smooth the baseline
-                        baseline_yaw = baseline_yaw * 0.8 + yaw * 0.2
-                        baseline_pitch = baseline_pitch * 0.8 + pitch * 0.2
-                    else:
-                        baseline_yaw = yaw
-                        baseline_pitch = pitch
-                        stable_frames = 1
-
-                    if stable_frames >= 8:  # ~0.4s of stable readings
-                        break
-            time.sleep(0.05)
-
-        if baseline_yaw is None:
-            voice_bot.speak_sync("sorry, I can't see your face. please try again")
-            self._gui(self._show_enroll)
-            return
-
-        print(f"[ENROLL] Baseline calibrated: yaw={baseline_yaw:.1f}, pitch={baseline_pitch:.1f}")
-
-        # Capture center immediately
-        if self._enroll_face_detected and self._enroll_current_frame is not None:
-            self._enroll_images.append(self._enroll_current_frame.copy())
-            self._enroll_segments["center"]["captured"] = True
-            self._enroll_segments["center"]["color"] = COLORS["accent_green"]
-            self._gui(self._update_enroll_ring_segment, "center", 1)
-
-        # ── Phase 2: Capture remaining 4 directions using delta from baseline ──
-        timeout = time.time() + 25  # 25 second max
-        while time.time() < timeout:
+        # ── Photo capture loop ──
+        for i, pose in enumerate(self._enroll_poses):
             if self._enroll_cancelled:
                 return
 
-            captured_count = sum(1 for s in self._enroll_segments.values() if s["captured"])
-            if captured_count >= 5:
-                break
+            # Display + speak the pose instruction
+            self._gui(self._set_enroll_instruction, f"👉  {pose}")
+            self._gui(self._set_enroll_progress, i + 1, total)
+            voice_bot.speak_sync(pose)
 
-            # Compute DELTA from baseline
-            delta_yaw = self._enroll_current_yaw - baseline_yaw
-            delta_pitch = self._enroll_current_pitch - baseline_pitch
+            if self._enroll_cancelled:
+                return
 
-            direction = None
-            if delta_yaw > YAW_THRESHOLD:
-                direction = "right"
-            elif delta_yaw < -YAW_THRESHOLD:
-                direction = "left"
-            elif delta_pitch < -PITCH_THRESHOLD:
-                direction = "up"
-            elif delta_pitch > PITCH_THRESHOLD:
-                direction = "down"
-
-            if direction and not self._enroll_segments[direction]["captured"]:
-                # Check for face and capture
+            # Wait for a face to appear, then auto-capture
+            captured = False
+            for attempt in range(60):     # ~3 seconds max
+                if self._enroll_cancelled:
+                    return
                 if self._enroll_face_detected and self._enroll_current_frame is not None:
                     self._enroll_images.append(self._enroll_current_frame.copy())
-                    self._enroll_segments[direction]["captured"] = True
-                    self._enroll_segments[direction]["color"] = COLORS["accent_green"]
-                    captured_count = sum(1 for s in self._enroll_segments.values() if s["captured"])
-                    # Update UI
-                    self._gui(self._update_enroll_ring_segment, direction, captured_count)
-                    print(f"[ENROLL] Captured '{direction}' (delta_yaw={delta_yaw:.1f}, delta_pitch={delta_pitch:.1f})")
+                    self._gui(self._set_enroll_captured, len(self._enroll_images), total)
+                    self._gui(self._flash_capture)
+                    captured = True
+                    break
+                time.sleep(0.01)
 
-                    # Duplicate face check on first non-center capture
-                    if captured_count == 2:
-                        from modules.face_recognition_module import get_live_embedding, match_face
-                        emb = get_live_embedding(self._enroll_images[0])
-                        if emb is not None:
-                            match = match_face(emb)
-                            if match:
-                                _, dname, _ = match
-                                voice_bot.speak_sync(f"you're already enrolled as {dname}, please authenticate directly")
-                                self._enroll_cancelled = True
-                                self._gui(self._show_home)
-                                return
+            if not captured:
+                # If no face after 3s, ask to retry
+                self._gui(self._set_enroll_instruction, "⚠️  No face detected — adjusting...")
+                voice_bot.speak_sync("I can't see your face, please adjust")
+                # try again for this pose
+                for attempt in range(100):
+                    if self._enroll_cancelled:
+                        return
+                    if self._enroll_face_detected and self._enroll_current_frame is not None:
+                        self._enroll_images.append(self._enroll_current_frame.copy())
+                        self._gui(self._set_enroll_captured, len(self._enroll_images), total)
+                        self._gui(self._flash_capture)
+                        captured = True
+                        break
+                    time.sleep(0.05)
 
-            # Update direction hint
-            next_needed = self._get_next_needed_direction()
-            if next_needed:
-                hints = {
-                    "center": "▶  Look straight at the camera",
-                    "right":  "▶  Turn your head to the RIGHT",
-                    "left":   "▶  Turn your head to the LEFT",
-                    "up":     "▶  Tilt your head UP",
-                    "down":   "▶  Tilt your head DOWN",
-                }
-                self._gui(self._set_enroll_instruction, hints.get(next_needed, ""))
+            if not captured:
+                voice_bot.speak_sync("sorry, enrollment failed. please try again")
+                self._gui(self._show_enroll)
+                return
 
-            time.sleep(0.05)
+            # Prevent duplicate face enrollments
+            if i == 0 and len(self._enroll_images) == 1:
+                from modules.face_recognition_module import get_live_embedding, match_face
+                emb = get_live_embedding(self._enroll_images[0])
+                if emb is not None:
+                    match = match_face(emb)
+                    if match:
+                        _, dname, _ = match
+                        self._gui(self._set_enroll_instruction, f"⚠️  You are already enrolled as {dname}!")
+                        voice_bot.speak_sync(f"ooh you're already there {dname}, please authenticate directly")
+                        self._enroll_cancelled = True
+                        self._gui(self._show_home)
+                        return
 
-        # Check if all captured
-        captured_count = sum(1 for s in self._enroll_segments.values() if s["captured"])
-        if captured_count < 5:
-            voice_bot.speak_sync("sorry, couldn't capture all angles. please try again")
-            self._gui(self._show_enroll)
-            return
+            # Say "very good" between captures (not after last one)
+            if i < len(self._enroll_poses) - 1:
+                voice_bot.speak_sync("very good")
+
+            time.sleep(0.1)   # brief natural pause
 
         if self._enroll_cancelled:
             return
@@ -1475,32 +1410,20 @@ class SecureFaceAuthApp:
 
     def _set_enroll_instruction(self, text):
         try:
-            self.enroll_direction_hint.config(text=text)
-        except (tk.TclError, AttributeError):
+            self.enroll_pose_label.config(text=text)
+        except tk.TclError:
             pass
 
-    def _get_next_needed_direction(self):
-        """Return the name of the next un-captured segment."""
-        for seg in self._enroll_segment_order:
-            if not self._enroll_segments[seg]["captured"]:
-                return seg
-        return None
-
-    def _update_enroll_ring_segment(self, direction, captured_count):
-        """Mark a ring segment as captured — visual feedback."""
+    def _set_enroll_progress(self, current, total):
         try:
-            lbl = self._enroll_seg_labels.get(direction)
-            if lbl:
-                lbl.config(text=f"  ● {direction.capitalize()}  ",
-                           fg=COLORS["accent_green"])
-            self.enroll_progress_label.config(
-                text=f"{captured_count} / 5 angles captured")
-            if captured_count >= 5:
-                self.enroll_pose_label.config(
-                    text="✅  All angles captured!",
-                    fg=COLORS["accent_green"])
-                self.enroll_direction_hint.config(text="")
-        except (tk.TclError, AttributeError):
+            self.enroll_progress_label.config(text=f"Photo {current} of {total}")
+        except tk.TclError:
+            pass
+
+    def _set_enroll_captured(self, captured, total):
+        try:
+            self.enroll_captured_label.config(text=f"Captured: {captured} / {total}")
+        except tk.TclError:
             pass
 
     def _flash_capture(self):
@@ -1511,20 +1434,19 @@ class SecureFaceAuthApp:
             pass
 
     def _show_enroll_loading(self):
-        """Replace the camera canvas with a polished loading screen."""
+        """Replace the frozen camera feed with a polished loading screen."""
         try:
-            # Hide the camera canvas and face status
-            self.enroll_canvas.pack_forget()
+            # Hide the camera feed and face status
+            self.enroll_video_label.pack_forget()
             self.enroll_face_status.pack_forget()
-            self.enroll_progress_label.pack_forget()
         except (tk.TclError, AttributeError):
             pass
 
         self._status("Processing enrollment...", COLORS["accent_amber"])
 
-        # Get the parent that held the canvas
+        # Get the parent card that held the camera
         try:
-            parent = self.enroll_canvas.master
+            parent = self.enroll_video_label.master
         except AttributeError:
             return
 
@@ -1596,116 +1518,31 @@ class SecureFaceAuthApp:
         frame = self._enroll_cam.read_frame()
         if frame is not None:
             self._enroll_current_frame = frame.copy()
-
-            # Detect face and compute REAL head rotation via dlib landmarks
             result = self._enroll_cam.detect_face(frame)
             if result:
                 _, bbox = result
                 x, y, w, h = bbox
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (139, 92, 246), 2)
                 self._enroll_face_detected = True
-
-                # Compute real yaw/pitch from facial landmarks
-                try:
-                    from modules.camera import _dlib_lock
-                    rgb_small = cv2.cvtColor(
-                        cv2.resize(frame, (0, 0), fx=0.5, fy=0.5),
-                        cv2.COLOR_BGR2RGB)
-                    rgb_small = np.ascontiguousarray(rgb_small)
-                    with _dlib_lock:
-                        locs = face_recognition.face_locations(rgb_small, model="hog")
-                        if locs:
-                            landmarks_list = face_recognition.face_landmarks(rgb_small, face_locations=locs)
-                    if locs and landmarks_list:
-                        lm = landmarks_list[0]
-                        # Same algorithm as head_movement.py
-                        nose_tip = np.array(lm["nose_tip"][2])
-                        left_eye_c = np.mean([np.array(p) for p in lm["left_eye"]], axis=0)
-                        right_eye_c = np.mean([np.array(p) for p in lm["right_eye"]], axis=0)
-                        chin = np.array(lm["chin"][8])
-                        mid_x = (left_eye_c[0] + right_eye_c[0]) / 2.0
-                        face_w = abs(right_eye_c[0] - left_eye_c[0]) * 2.5
-                        if face_w > 0.01:
-                            self._enroll_current_yaw = ((nose_tip[0] - mid_x) / face_w) * 90.0
-                        mid_y = (left_eye_c[1] + right_eye_c[1]) / 2.0
-                        face_h = abs(chin[1] - mid_y)
-                        if face_h > 0.01:
-                            self._enroll_current_pitch = ((nose_tip[1] - mid_y) / face_h) * 90.0
-                except Exception:
-                    pass  # fall back to cached values
-
-                try:
-                    self.enroll_face_status.config(text="", fg=COLORS["success"])
-                except tk.TclError:
-                    pass
+                try: self.enroll_face_status.config(text="✓ Face detected", fg=COLORS["success"])
+                except tk.TclError: pass
             else:
                 self._enroll_face_detected = False
-                self._enroll_current_yaw = 0.0
-                self._enroll_current_pitch = 0.0
-                try:
-                    self.enroll_face_status.config(
-                        text="No face detected — adjust position",
-                        fg=COLORS["error"])
-                except tk.TclError:
-                    pass
+                try: self.enroll_face_status.config(text="✗ No face — adjust position", fg=COLORS["error"])
+                except tk.TclError: pass
 
-            # Draw frame with ring overlay on canvas
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
             try:
-                cw = self.enroll_canvas.winfo_width()
-                ch = self.enroll_canvas.winfo_height()
-                if cw > 10 and ch > 10:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = Image.fromarray(rgb).resize((cw, ch), Image.LANCZOS)
-                    imgtk = ImageTk.PhotoImage(image=img)
-                    self.enroll_canvas.delete("all")
-                    self.enroll_canvas.create_image(cw // 2, ch // 2, image=imgtk)
-                    self.enroll_canvas._imgtk = imgtk  # prevent GC
-
-                    # Draw circular progress ring
-                    ring_size = min(cw, ch) - 40
-                    rx = (cw - ring_size) // 2
-                    ry = (ch - ring_size) // 2
-                    ring_width = 6
-
-                    # Segment arcs: 5 segments, each 72 degrees
-                    # Order: center(top), right, down, left, up
-                    segment_angles = [
-                        ("center", 54, 72),    # top
-                        ("right",  126, 72),   # right
-                        ("down",   198, 72),   # bottom
-                        ("left",   270, 72),   # left
-                        ("up",     342, 72),   # top-left
-                    ]
-
-                    for seg_name, start_angle, extent in segment_angles:
-                        seg_data = self._enroll_segments.get(seg_name, {})
-                        color = seg_data.get("color", COLORS["step_pending"])
-                        if seg_data.get("captured"):
-                            color = "#00e676"  # bright green
-                            width = ring_width + 3
-                        else:
-                            color = "#444466"
-                            width = ring_width
-
-                        self.enroll_canvas.create_arc(
-                            rx, ry, rx + ring_size, ry + ring_size,
-                            start=start_angle, extent=extent - 4,  # gap between segments
-                            outline=color, width=width, style="arc")
-
-                    # Draw face bounding box if detected
-                    if self._enroll_face_detected and result:
-                        _, bbox = result
-                        bx, by, bw, bh = bbox
-                        # Scale bbox to canvas
-                        fh_orig, fw_orig = frame.shape[:2]
-                        sx = cw / fw_orig
-                        sy = ch / fh_orig
-                        self.enroll_canvas.create_rectangle(
-                            bx * sx, by * sy,
-                            (bx + bw) * sx, (by + bh) * sy,
-                            outline=COLORS["accent_purple"], width=2)
-
-            except (tk.TclError, AttributeError):
-                pass
+                lw, lh = self.enroll_video_label.winfo_width(), self.enroll_video_label.winfo_height()
+                if lw > 10 and lh > 10:
+                    img = img.resize((lw, lh), Image.LANCZOS)
+            except: pass
+            imgtk = ImageTk.PhotoImage(image=img)
+            try:
+                self.enroll_video_label.imgtk = imgtk
+                self.enroll_video_label.config(image=imgtk)
+            except tk.TclError: return
 
         self._enroll_after_id = self.root.after(33, self._update_enroll_feed)
 
