@@ -35,6 +35,7 @@ from modules.head_movement import HeadMovementChallenge
 from modules.blink_detection import BlinkDetection
 from modules.voice_challenge import VoiceChallenge
 from modules.session import SessionManager, AuditLogger
+from modules.continuous_verifier import ContinuousVerifier
 
 # ─── Premium Color Palette ────────────────────────────────────────────────────
 COLORS = {
@@ -280,6 +281,7 @@ class SecureFaceAuthApp:
         self.camera: Optional[CameraCapture] = None
         self.camera_running = False
         self.pipeline_running = False
+        self.pipeline_abort = False
         self.current_frame = None
         self._after_id = None
 
@@ -357,6 +359,7 @@ class SecureFaceAuthApp:
     # ─── Home Screen ─────────────────────────────────────────────────────
 
     def _show_home(self):
+        self.pipeline_abort = True
         self._clear(); self._stop_camera(); self._stop_enroll_camera()
         self._status("Home", COLORS["accent_green"])
 
@@ -469,7 +472,7 @@ class SecureFaceAuthApp:
         pf2.pack(fill="x", pady=8)
         tk.Label(pf2, text="Port:", font=(FONT, 11, "bold"), bg=COLORS["bg_card"],
                  fg=COLORS["text_secondary"], width=10, anchor="w").pack(side="left")
-        self.port_var = tk.StringVar(value="8080")
+        self.port_var = tk.StringVar(value="4747")
         tk.Entry(pf2, textvariable=self.port_var, font=(FONT, 12), width=10,
                  bg=COLORS["bg_input"], fg=COLORS["text_primary"],
                  insertbackground=COLORS["text_primary"], relief="flat",
@@ -484,7 +487,7 @@ class SecureFaceAuthApp:
         GlowButton(c, "←  Back", lambda: self._show_camera_select(is_enroll),
                    width=160, height=38, bg=COLORS["step_pending"], font_size=10).pack(pady=(28, 0))
 
-    # ─── Camera Start Handlers ───────────────────────────────────────────
+    # ─── Camera Start Handlers ───
 
     def _start_local_camera(self, is_enroll=False):
         self._status(f"Connecting to internal camera...", COLORS["accent_amber"])
@@ -614,7 +617,13 @@ class SecureFaceAuthApp:
             ip, text="", font=(FONT, 9, "bold"),
             bg=COLORS["bg_card"], fg=COLORS["accent_amber"],
             wraplength=270, justify="center", anchor="center")
-        self.recording_status_label.pack(fill="x", padx=10, pady=(6, 8))
+        self.recording_status_label.pack(fill="x", padx=10, pady=(6, 4))
+
+        # Continuous identity monitor indicator
+        self.monitor_indicator_label = tk.Label(
+            ip, text="", font=(FONT, 8),
+            bg=COLORS["bg_card"], fg=COLORS["accent_green"])
+        self.monitor_indicator_label.pack(fill="x", padx=10, pady=(0, 6))
 
         # Bottom buttons
         bot = tk.Frame(self.content, bg=COLORS["bg_dark"])
@@ -650,6 +659,18 @@ class SecureFaceAuthApp:
         """Update the recording status label in the pipeline panel."""
         try:
             self.recording_status_label.config(text=text)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _set_monitor_indicator(self, active: bool):
+        """Show/hide the continuous identity monitoring indicator."""
+        try:
+            if active:
+                self.monitor_indicator_label.config(
+                    text="\U0001f512  Identity monitored",
+                    fg=COLORS["accent_green"])
+            else:
+                self.monitor_indicator_label.config(text="")
         except (tk.TclError, AttributeError):
             pass
 
@@ -712,7 +733,7 @@ class SecureFaceAuthApp:
 
     def _resume_camera_feed(self):
         """Resume the GUI feed loop after the pipeline finishes."""
-        if self.camera and self.camera.cap and self.camera.cap.isOpened():
+        if self.camera and self.camera.is_active:
             self.camera_running = True
             self._update_camera_feed()
 
@@ -722,7 +743,9 @@ class SecureFaceAuthApp:
         if self.pipeline_running:
             return
         self.pipeline_running = True
+        self.pipeline_abort = False
         self._hide_result_banner()
+        self._hide_camera_success_overlay()
         self.step_indicator.reset()
         self.pipeline_log.config(state="normal")
         self.pipeline_log.delete("1.0", "end")
@@ -739,14 +762,17 @@ class SecureFaceAuthApp:
 
         uid = "unknown"
         dname = ""
+        verifier = None  # Continuous identity monitor (swap attack prevention)
 
         try:
             # ── Opening greeting ──
+            if self.pipeline_abort: return
             self._gui(self._set_challenge_text, "🎤  hey, lets see who are you")
             self._gui(self._log, "▸ AI: hey, lets see who are you", "step")
             voice_bot.speak_sync("hey, lets see who are you")
 
             # ── Step 1: Face Detection ──
+            if self.pipeline_abort: return
             self._gui(self.step_indicator.set_state, 0, "active")
             self._gui(self._log, "\n▸ Step 1: Detecting face...", "step")
             self._gui(self._status, "Step 1: Face detection", COLORS["accent_blue"])
@@ -754,6 +780,7 @@ class SecureFaceAuthApp:
 
             frame = None; face_bbox = None
             for _ in range(200):
+                if self.pipeline_abort: return
                 if self.current_frame is not None:
                     result = self.camera.detect_face(self.current_frame)
                     if result:
@@ -766,6 +793,7 @@ class SecureFaceAuthApp:
             self._gui(self._log, "  ✓ Face detected.", "success")
 
             # ── Step 2: Face Recognition ──
+            if self.pipeline_abort: return
             self._gui(self.step_indicator.set_state, 1, "active")
             self._gui(self._log, "\n▸ Step 2: Matching face...", "step")
             self._gui(self._status, "Step 2: Face recognition", COLORS["accent_blue"])
@@ -796,9 +824,15 @@ class SecureFaceAuthApp:
                       "🎤  hmmm i guess we know you\n     but we need to confirm if it's really you")
             voice_bot.speak_sync(
                 "hmmm i guess we know you but we need to confirm if it's really you")
-            time.sleep(0.5)
+
+            # ── Start continuous identity monitor (swap attack prevention) ──
+            if self.pipeline_abort: return
+            verifier = ContinuousVerifier(embedding, self.camera)
+            verifier.start()
+            self._gui(self._set_monitor_indicator, True)
 
             # ── Step 3: Anti-Spoofing ──
+            if self.pipeline_abort: return
             self._gui(self.step_indicator.set_state, 2, "active")
             self._gui(self._log, "\n▸ Step 3: Anti-spoofing check...", "step")
             self._gui(self._status, "Step 3: Anti-spoofing", COLORS["accent_blue"])
@@ -813,9 +847,9 @@ class SecureFaceAuthApp:
             self._gui(self._log, f"  ✓ Liveness confirmed ({pad_conf:.2f})", "success")
             self._gui(self._set_challenge_text, "✓  you look real to me")
             voice_bot.speak_sync("you look real to me")
-            time.sleep(0.3)
 
             # ── Step 4: Greeting (confirmed identity) ──
+            if self.pipeline_abort: return
             self._gui(self.step_indicator.set_state, 3, "active")
             self._gui(self._log, "\n▸ Step 4: Identity confirmation...", "step")
             self._gui(self._status, "Step 4: Identity prompt", COLORS["accent_blue"])
@@ -824,23 +858,35 @@ class SecureFaceAuthApp:
             voice_bot.speak_sync("now i need to run a few more tests to be sure")
             self._gui(self.step_indicator.set_state, 3, "done")
             self._gui(self._log, "  ✓ Identity prompt delivered.", "success")
-            time.sleep(0.3)
 
             # ── PAUSE GUI feed — pipeline needs exclusive camera access ──
+            # The challenges render frames via update_frame_callback, so the
+            # camera feed stays visually alive. We only stop the GUI's own
+            # competing read loop to avoid frame contention.
             self._gui(self._pause_camera_feed)
-            time.sleep(0.3)
+            time.sleep(0.05)  # minimal yield for GUI thread to process
+
+            # ── Continuous identity check before Step 5 ──
+            if verifier and verifier.is_violated():
+                verifier.stop()
+                self._gui(self._set_monitor_indicator, False)
+                self._gui(self._resume_camera_feed)
+                self._fail(4, "⚠️  " + verifier.violation_reason(), audit, uid)
+                return
 
             # ── Step 5: Head Movement ──
+            if self.pipeline_abort: return
             self._gui(self.step_indicator.set_state, 4, "active")
             self._gui(self._log, "\n▸ Step 5: Head movement challenge...", "step")
             self._gui(self._status, "Step 5: Head movement", COLORS["accent_blue"])
 
             head_ok, head_reason = False, "Camera not available."
-            if self.camera and self.camera.cap:
+            if self.camera and self.camera.is_active:
                 for attempt in range(3):
                     # Speak the direction before starting the challenge
                     direction = head_challenge._get_random_direction()
                     head_challenge.last_direction = direction
+                    self._gui(self._log, f"  ▸ Challenge: {direction}...", "step")
                     
                     if attempt == 0:
                         self._gui(self._set_challenge_text, f"🔄  please {direction}")
@@ -849,12 +895,13 @@ class SecureFaceAuthApp:
                         self._gui(self._set_challenge_text, f"🔄  let's try that again. please {direction}")
                         voice_bot.speak_sync(f"let's try that again. please {direction}")
                         
-                    time.sleep(0.3)
+                    time.sleep(0.05)
 
                     head_ok, head_reason = head_challenge.run_challenge(
                         self.camera, use_gui=True,
                         preset_direction=direction,
-                        update_frame_callback=lambda f: self._gui(self._render_frame, f))
+                        update_frame_callback=lambda f: self._gui(self._render_frame, f),
+                        update_ui_callback=lambda t: self._gui(self._set_recording_status, t))
                         
                     if head_ok:
                         break
@@ -865,6 +912,7 @@ class SecureFaceAuthApp:
                 head_ok, head_reason = False, "Camera not available."
 
             self._gui(self._set_challenge_text, "")
+            self._gui(self._set_recording_status, "")
             if not head_ok:
                 self._gui(self._resume_camera_feed)
                 self._fail(4, f"Failed after 3 attempts: {head_reason}", audit, uid); return
@@ -873,14 +921,22 @@ class SecureFaceAuthApp:
             self._gui(self._log, f"  ✓ {head_reason}", "success")
             self._gui(self._set_challenge_text, "✓  head movement detected")
             voice_bot.speak_sync("good")
-            time.sleep(0.3)
+
+            # ── Continuous identity check before Step 6 ──
+            if self.pipeline_abort: return
+            if verifier and verifier.is_violated():
+                verifier.stop()
+                self._gui(self._set_monitor_indicator, False)
+                self._gui(self._resume_camera_feed)
+                self._fail(5, "⚠️  " + verifier.violation_reason(), audit, uid)
+                return
 
             # ── Step 6: Blink Detection ──
             self._gui(self.step_indicator.set_state, 5, "active")
             self._gui(self._log, "\n▸ Step 6: Blink detection...", "step")
             self._gui(self._status, "Step 6: Blink challenge", COLORS["accent_blue"])
             blink_ok, blink_reason = False, "Camera not available."
-            if self.camera and self.camera.cap:
+            if self.camera and self.camera.is_active:
                 for attempt in range(3):
                     if attempt == 0:
                         self._gui(self._set_challenge_text, "👁️  now blink a few times for me")
@@ -891,7 +947,8 @@ class SecureFaceAuthApp:
 
                     blink_ok, blink_reason = blink_det.run_challenge(
                         self.camera, pad_passed=is_real, use_gui=True,
-                        update_frame_callback=lambda f: self._gui(self._render_frame, f))
+                        update_frame_callback=lambda f: self._gui(self._render_frame, f),
+                        update_ui_callback=lambda t: self._gui(self._set_recording_status, t))
                         
                     if blink_ok:
                         break
@@ -902,6 +959,7 @@ class SecureFaceAuthApp:
                 blink_ok, blink_reason = False, "Camera not available."
 
             self._gui(self._set_challenge_text, "")
+            self._gui(self._set_recording_status, "")
             if not blink_ok:
                 self._gui(self._resume_camera_feed)
                 self._fail(5, f"Failed after 3 attempts: {blink_reason}", audit, uid); return
@@ -909,8 +967,14 @@ class SecureFaceAuthApp:
             self._gui(self.step_indicator.set_state, 5, "done")
             self._gui(self._log, f"  ✓ {blink_reason}", "success")
 
-            # ── RESUME GUI feed ──
-            self._gui(self._resume_camera_feed)
+            # ── Continuous identity check before Step 7 ──
+            if self.pipeline_abort: return
+            if verifier and verifier.is_violated():
+                verifier.stop()
+                self._gui(self._set_monitor_indicator, False)
+                self._gui(self._resume_camera_feed)
+                self._fail(6, "⚠️  " + verifier.violation_reason(), audit, uid)
+                return
 
             # ── Step 7: Voice Challenge ──
             self._gui(self.step_indicator.set_state, 6, "active")
@@ -925,11 +989,13 @@ class SecureFaceAuthApp:
                     self._gui(self._set_challenge_text, "🎤  let's try that again. i need to hear your voice")
                     voice_bot.speak_sync("let's try that again. i need to hear your voice")
                     
-                time.sleep(0.3)
+                time.sleep(0.05)
 
                 voice_ok, voice_reason = voice_chal.run_challenge(
+                    self.camera,
                     user_id=uid,
-                    update_ui_callback=lambda t: self._gui(self._set_recording_status, t))
+                    update_ui_callback=lambda t: self._gui(self._set_recording_status, t),
+                    update_frame_callback=lambda f: self._gui(self._render_frame, f))
                 if voice_ok:
                     break
                     
@@ -943,6 +1009,15 @@ class SecureFaceAuthApp:
 
             self._gui(self.step_indicator.set_state, 6, "done")
             self._gui(self._log, f"  ✓ {voice_reason}", "success")
+
+            # ── Continuous identity check before Step 8 ──
+            if self.pipeline_abort: return
+            if verifier and verifier.is_violated():
+                verifier.stop()
+                self._gui(self._set_monitor_indicator, False)
+                self._gui(self._resume_camera_feed)
+                self._fail(7, "⚠️  " + verifier.violation_reason(), audit, uid)
+                return
 
             # ── Step 8: Session Token ──
             self._gui(self.step_indicator.set_state, 7, "active")
@@ -965,6 +1040,7 @@ class SecureFaceAuthApp:
                       f"   Welcome, {dname}!\n{'━'*30}", "success")
             self._gui(self._set_challenge_text,
                       f"🎤  oh its really you, welcome {dname}!")
+            self._gui(self._show_camera_success_overlay, dname)
             voice_bot.speak_sync(f"oh its really you, welcome {dname}")
             self._gui(self._show_result_banner, True, f"✅  ACCESS GRANTED — Welcome, {dname}   |   Token: {token[:20]}...")
 
@@ -978,6 +1054,12 @@ class SecureFaceAuthApp:
 
         finally:
             self.pipeline_running = False
+            try:
+                if verifier:
+                    verifier.stop()
+                    self._gui(self._set_monitor_indicator, False)
+            except Exception:
+                pass
             try: head_challenge.close()
             except: pass
             try: blink_det.close()
@@ -1001,6 +1083,28 @@ class SecureFaceAuthApp:
         if hasattr(self, '_result_banner') and getattr(self, '_result_banner', None):
             self._result_banner.destroy()
             self._result_banner = None
+
+    def _show_camera_success_overlay(self, dname):
+        self._hide_camera_success_overlay()
+        parent = self.video_label.master
+        self.auth_success_overlay = tk.Frame(parent, bg=COLORS["bg_card"])
+        self.auth_success_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        # Content container to center vertically and horizontally
+        content = tk.Frame(self.auth_success_overlay, bg=COLORS["bg_card"])
+        content.place(relx=0.5, rely=0.5, anchor="center")
+
+        tk.Label(content, text="✅", font=("Segoe UI Emoji", 48),
+                 bg=COLORS["bg_card"], fg=COLORS["success"]).pack(pady=(0, 10))
+        tk.Label(content, text="Authenticated Successfully", font=(FONT, 20, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["success"]).pack(pady=(0, 5))
+        tk.Label(content, text=f"Welcome back, {dname}!", font=(FONT, 14),
+                 bg=COLORS["bg_card"], fg=COLORS["text_primary"]).pack()
+
+    def _hide_camera_success_overlay(self):
+        if hasattr(self, 'auth_success_overlay') and getattr(self, 'auth_success_overlay', None):
+            self.auth_success_overlay.destroy()
+            self.auth_success_overlay = None
 
     def _show_result_banner(self, success, text):
         self._hide_result_banner()
@@ -1221,21 +1325,29 @@ class SecureFaceAuthApp:
             if self._enroll_cancelled:
                 return
 
-            # Display + speak the pose instruction
-            self._gui(self._set_enroll_instruction, f"👉  {pose}")
+            # Display scanning status (voice still guides the pose)
+            self._gui(self._set_enroll_instruction, f"📷  Scanning... ({i + 1}/{total})")
             self._gui(self._set_enroll_progress, i + 1, total)
             voice_bot.speak_sync(pose)
 
             if self._enroll_cancelled:
                 return
 
-            # Wait for a face to appear, then auto-capture
+            # Wait for a face to appear, then auto-capture (store resized crop for speed)
             captured = False
             for attempt in range(60):     # ~3 seconds max
                 if self._enroll_cancelled:
                     return
                 if self._enroll_face_detected and self._enroll_current_frame is not None:
-                    self._enroll_images.append(self._enroll_current_frame.copy())
+                    # Store a 480x480 resized copy instead of the full frame
+                    # to reduce memory and speed up face_encodings later
+                    fr = self._enroll_current_frame
+                    h, w = fr.shape[:2]
+                    target = 480
+                    if max(h, w) > target:
+                        scale = target / max(h, w)
+                        fr = cv2.resize(fr, (int(w * scale), int(h * scale)))
+                    self._enroll_images.append(fr)
                     self._gui(self._set_enroll_captured, len(self._enroll_images), total)
                     self._gui(self._flash_capture)
                     captured = True
@@ -1251,7 +1363,13 @@ class SecureFaceAuthApp:
                     if self._enroll_cancelled:
                         return
                     if self._enroll_face_detected and self._enroll_current_frame is not None:
-                        self._enroll_images.append(self._enroll_current_frame.copy())
+                        fr = self._enroll_current_frame
+                        h, w = fr.shape[:2]
+                        target = 480
+                        if max(h, w) > target:
+                            scale = target / max(h, w)
+                            fr = cv2.resize(fr, (int(w * scale), int(h * scale)))
+                        self._enroll_images.append(fr)
                         self._gui(self._set_enroll_captured, len(self._enroll_images), total)
                         self._gui(self._flash_capture)
                         captured = True
@@ -1273,15 +1391,16 @@ class SecureFaceAuthApp:
                         _, dname, _ = match
                         self._gui(self._set_enroll_instruction, f"⚠️  You are already enrolled as {dname}!")
                         voice_bot.speak_sync(f"ooh you're already there {dname}, please authenticate directly")
+                        time.sleep(3)  # Let the user read the message
                         self._enroll_cancelled = True
                         self._gui(self._show_home)
                         return
 
-            # Say "very good" between captures (not after last one)
+            # Say "very good" between captures (non-blocking so user can move)
             if i < len(self._enroll_poses) - 1:
-                voice_bot.speak_sync("very good")
+                voice_bot.speak("very good")  # async — doesn't block next pose
 
-            time.sleep(0.1)   # brief natural pause
+            time.sleep(0.05)   # minimal pause
 
         if self._enroll_cancelled:
             return
@@ -1309,6 +1428,11 @@ class SecureFaceAuthApp:
         question = random.choice(questions)
         self._gui(self._set_enroll_instruction, f"🎤  \"{question}\"")
         voice_bot.speak_sync(question)
+
+        # Keep the question visible for at least 5 seconds so user can read it
+        self._gui(self._set_enroll_instruction,
+                  f"🎤  \"{question}\"\n\n     📖  Read the question above, recording starts soon...")
+        time.sleep(5)
 
         if self._enroll_cancelled:
             return
@@ -1346,11 +1470,11 @@ class SecureFaceAuthApp:
 
         # Replace frozen camera with a loading screen
         self._gui(self._show_enroll_loading)
-        time.sleep(0.3)
+        time.sleep(0.1)
 
         # Stop camera on the GUI thread (touching tkinter from background = crash)
         self._gui(self._stop_enroll_camera)
-        time.sleep(0.5)   # let the GUI thread process the stop
+        time.sleep(0.15)   # let the GUI thread process the stop
 
         uid = self._enroll_uid
         name = self._enroll_name
@@ -1385,7 +1509,7 @@ class SecureFaceAuthApp:
 
             # Step 4: Done
             self._gui(self._update_enroll_loading, "✅  Finalizing...", 4, 4)
-            time.sleep(0.3)
+            time.sleep(0.1)
 
             if success:
                 voice_bot.speak_sync("excellent, we have successfully enrolled you")
@@ -1518,18 +1642,28 @@ class SecureFaceAuthApp:
         frame = self._enroll_cam.read_frame()
         if frame is not None:
             self._enroll_current_frame = frame.copy()
-            result = self._enroll_cam.detect_face(frame)
-            if result:
-                _, bbox = result
+
+            # Only run face detection every 3rd frame to reduce CPU load
+            self._enroll_frame_count = getattr(self, '_enroll_frame_count', 0) + 1
+            if self._enroll_frame_count % 3 == 0:
+                result = self._enroll_cam.detect_face(frame)
+                if result:
+                    _, bbox = result
+                    self._enroll_last_bbox = bbox
+                    self._enroll_face_detected = True
+                    try: self.enroll_face_status.config(text="✓ Face detected", fg=COLORS["success"])
+                    except tk.TclError: pass
+                else:
+                    self._enroll_last_bbox = None
+                    self._enroll_face_detected = False
+                    try: self.enroll_face_status.config(text="✗ No face — adjust position", fg=COLORS["error"])
+                    except tk.TclError: pass
+
+            # Draw cached bounding box
+            bbox = getattr(self, '_enroll_last_bbox', None)
+            if bbox:
                 x, y, w, h = bbox
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (139, 92, 246), 2)
-                self._enroll_face_detected = True
-                try: self.enroll_face_status.config(text="✓ Face detected", fg=COLORS["success"])
-                except tk.TclError: pass
-            else:
-                self._enroll_face_detected = False
-                try: self.enroll_face_status.config(text="✗ No face — adjust position", fg=COLORS["error"])
-                except tk.TclError: pass
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)

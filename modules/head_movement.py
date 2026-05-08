@@ -59,7 +59,8 @@ class HeadMovementChallenge:
     def run_challenge(self, camera,
                       use_gui: bool = False,
                       preset_direction: str = None,
-                      update_frame_callback=None) -> Tuple[bool, str]:
+                      update_frame_callback=None,
+                      update_ui_callback=None) -> Tuple[bool, str]:
         """
         Run the head movement liveness challenge.
 
@@ -67,6 +68,8 @@ class HeadMovementChallenge:
             camera: CameraCapture instance.
             use_gui: If True, skip cv2.imshow/waitKey (GUI handles display).
             preset_direction: If provided, use this direction instead of random.
+            update_frame_callback: Callable to send frame to GUI.
+            update_ui_callback: Callable to update the GUI text status.
 
         Returns:
             (success: bool, reason: str)
@@ -77,10 +80,7 @@ class HeadMovementChallenge:
             direction = random.choice(config.HEAD_CHALLENGE_DIRECTIONS)
         self.last_direction = direction
         
-        if not preset_direction:
-            # Only speak if pipeline hasn't already spoken
-            import modules.ai_voice_bot as avb
-            avb.bot.speak(f"Please {direction}")
+        # Voice prompt is handled by the calling pipeline (gui.py) — no TTS here
         print(f"[CHALLENGE] Head movement: Please {direction}.")
 
         start_time = time.time()
@@ -91,19 +91,34 @@ class HeadMovementChallenge:
 
         frame_skip = 0
         while time.time() - start_time < config.HEAD_CHALLENGE_TIMEOUT:
+            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
+                # Check if the UI callback is linked to an app that has been aborted
+                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
+                    return False, "Aborted by user."
+
             frame = camera.read_frame()
             if frame is None:
                 time.sleep(0.01)
                 continue
 
             frame_skip += 1
-            if frame_skip % 2 != 0:
-                if update_frame_callback:
-                    update_frame_callback(frame)
-                continue
 
             if update_frame_callback:
-                update_frame_callback(frame)
+                update_frame_callback(frame.copy())
+            
+            if update_ui_callback:
+                elapsed = time.time() - start_time
+                remaining = max(0, config.HEAD_CHALLENGE_TIMEOUT - elapsed)
+                bar_total = 20
+                bar_filled = int((elapsed / config.HEAD_CHALLENGE_TIMEOUT) * bar_total)
+                bar_empty = bar_total - bar_filled
+                bar = "█" * bar_filled + "░" * bar_empty
+                update_ui_callback(
+                    f"👤  Action required: {direction}\n"
+                    f"     {bar}  {remaining:.0f}s")
+
+            if frame_skip % 2 != 0:
+                continue
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             small_rgb = cv2.resize(rgb, (0, 0), fx=0.5, fy=0.5)

@@ -56,24 +56,23 @@ class AntiSpoofing:
         """
         Compute a Local Binary Pattern histogram for texture analysis.
         Real faces produce different LBP distributions than flat printouts.
+
+        Uses fully vectorized NumPy operations instead of pixel-level Python
+        loops for ~100x speedup.
         """
         gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
-        lbp = np.zeros_like(gray, dtype=np.uint8)
+        center = gray[1:-1, 1:-1]
 
-        for i in range(1, h - 1):
-            for j in range(1, w - 1):
-                center = gray[i, j]
-                code = 0
-                code |= (1 << 7) if gray[i - 1, j - 1] >= center else 0
-                code |= (1 << 6) if gray[i - 1, j] >= center else 0
-                code |= (1 << 5) if gray[i - 1, j + 1] >= center else 0
-                code |= (1 << 4) if gray[i, j + 1] >= center else 0
-                code |= (1 << 3) if gray[i + 1, j + 1] >= center else 0
-                code |= (1 << 2) if gray[i + 1, j] >= center else 0
-                code |= (1 << 1) if gray[i + 1, j - 1] >= center else 0
-                code |= (1 << 0) if gray[i, j - 1] >= center else 0
-                lbp[i, j] = code
+        # Vectorized LBP: compare each neighbor against the center pixel
+        lbp = np.zeros_like(center, dtype=np.uint8)
+        lbp |= ((gray[0:-2, 0:-2] >= center).astype(np.uint8) << 7)  # top-left
+        lbp |= ((gray[0:-2, 1:-1] >= center).astype(np.uint8) << 6)  # top
+        lbp |= ((gray[0:-2, 2:]   >= center).astype(np.uint8) << 5)  # top-right
+        lbp |= ((gray[1:-1, 2:]   >= center).astype(np.uint8) << 4)  # right
+        lbp |= ((gray[2:,   2:]   >= center).astype(np.uint8) << 3)  # bottom-right
+        lbp |= ((gray[2:,   1:-1] >= center).astype(np.uint8) << 2)  # bottom
+        lbp |= ((gray[2:,   0:-2] >= center).astype(np.uint8) << 1)  # bottom-left
+        lbp |= ((gray[1:-1, 0:-2] >= center).astype(np.uint8) << 0)  # left
 
         hist, _ = np.histogram(lbp.ravel(), bins=256, range=(0, 256))
         hist = hist.astype(np.float32)

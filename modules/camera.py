@@ -7,15 +7,44 @@ Uses standard face_recognition (dlib) to detect face bounds.
 
 import sys
 import os
+
+# ── MUST be set BEFORE importing cv2/FFmpeg ──────────────────────────────
+os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;quiet"
+os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
+
 import cv2
 import numpy as np
 import socket
 import threading
 from typing import Optional, Tuple, Union, List
 
+try:
+    import requests
+except ImportError:
+    requests = None
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 import face_recognition
+
+
+# ── OS-level stderr suppression for FFmpeg C output ──────────────────────
+class _SuppressStderr:
+    """Context manager that redirects the OS file descriptor for stderr to
+    devnull.  This catches FFmpeg's C-level fprintf(stderr, ...) which
+    Python's sys.stderr redirect cannot capture."""
+
+    def __enter__(self):
+        self._old_stderr_fd = os.dup(2)
+        self._devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(self._devnull, 2)
+        return self
+
+    def __exit__(self, *args):
+        os.dup2(self._old_stderr_fd, 2)
+        os.close(self._old_stderr_fd)
+        os.close(self._devnull)
 
 # Global lock to serialize all dlib C++ calls (face_locations / face_encodings).
 # dlib is NOT thread-safe; concurrent calls from different threads cause segfaults.
@@ -39,13 +68,49 @@ class CameraCapture:
         self.cap: Optional[cv2.VideoCapture] = None
         self.is_external = isinstance(camera_source, str)
         self.is_droidcam = False
-        self.droidcam_session: Optional[requests.Session] = None
+        self.droidcam_session = None  # type: Optional[object]
 
         # Threaded frame grabber state
         self._frame_thread: Optional[threading.Thread] = None
         self._frame_lock = threading.Lock()    # Protects _latest_frame
         self._latest_frame: Optional[np.ndarray] = None
         self._thread_running = False
+
+        # Stderr suppression state (external cameras only)
+        self._stderr_suppressed = False
+        self._old_stderr_fd = None
+        self._devnull_fd = None
+
+    def _suppress_stderr(self):
+        """Redirects OS-level stderr to devnull to suppress FFmpeg logs."""
+        if not self._stderr_suppressed:
+            try:
+                self._old_stderr_fd = os.dup(2)
+                self._devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(self._devnull_fd, 2)
+                self._stderr_suppressed = True
+            except Exception as e:
+                pass
+
+    def _restore_stderr(self):
+        """Restores OS-level stderr to its original state."""
+        if self._stderr_suppressed:
+            try:
+                os.dup2(self._old_stderr_fd, 2)
+                os.close(self._old_stderr_fd)
+                os.close(self._devnull_fd)
+                self._stderr_suppressed = False
+            except Exception as e:
+                pass
+
+    @property
+    def is_active(self) -> bool:
+        """True if the camera is functional (either OpenCV or snapshot mode)."""
+        if self.is_droidcam and self.droidcam_session is not None:
+            return True
+        if self.cap is not None and self.cap.isOpened():
+            return True
+        return False
 
     @staticmethod
     def build_external_urls(ip: str, port: str) -> List[str]:
@@ -79,16 +144,23 @@ class CameraCapture:
         try:
             if self.is_external:
                 print(f"[INFO] Connecting to external camera: {self.camera_source}")
-                # Detect if this is a DroidCam stream
-                if self._try_droidcam_connection():
+                # Try snapshot mode first (DroidCam, IP Webcam) — avoids MJPEG issues
+                if self._try_snapshot_connection():
                     return True
             else:
                 print(f"[INFO] Opening local camera index: {self.camera_source}")
 
-            # On Windows, explicitly use DirectShow to avoid MSMF crashes with internal webcams
             if not self.is_external and os.name == 'nt':
+                # Try DirectShow first (avoids MSMF crashes with some webcams)
                 self.cap = cv2.VideoCapture(self.camera_source, cv2.CAP_DSHOW)
+                if not self.cap.isOpened():
+                    # Fallback: try default backend if DSHOW failed
+                    print("[INFO] DirectShow failed, trying default backend...")
+                    self.cap = cv2.VideoCapture(self.camera_source)
             else:
+                # For external cameras, redirect stderr ONCE to suppress
+                # FFmpeg mpjpeg warnings for the entire camera session
+                self._suppress_stderr()
                 self.cap = cv2.VideoCapture(self.camera_source)
 
             if not self.cap.isOpened():
@@ -108,9 +180,6 @@ class CameraCapture:
                 # Auto-focus and exposure
                 self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
                 self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-            else:
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_FRAME_WIDTH)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_FRAME_HEIGHT)
 
             # Test reading a frame
             ret, test_frame = self.cap.read()
@@ -118,6 +187,7 @@ class CameraCapture:
                 print("[ERROR] Camera opened but cannot read frames.")
                 self.cap.release()
                 self.cap = None
+                self._restore_stderr()
                 return False
 
             actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -133,76 +203,94 @@ class CameraCapture:
             print(f"[ERROR] Camera initialization failed: {e}")
             return False
 
-    def _try_droidcam_connection(self) -> bool:
-        """Try to connect to DroidCam using HTTP MJPEG stream."""
-        try:
-            # Try both with and without auth
-            auth_variants = [None, ("admin", "admin"), ("admin", "droidcam")]
-            
-            for auth in auth_variants:
-                try:
-                    session = requests.Session()
-                    session.timeout = 5
-                    
-                    # Test connection
-                    response = session.get(self.camera_source, auth=auth, stream=True, timeout=5)
-                    if response.status_code == 200:
-                        print(f"[INFO] DroidCam stream authenticated successfully")
-                        self.droidcam_session = session
+    def _try_snapshot_connection(self) -> bool:
+        """Try to connect using a JPEG snapshot endpoint (DroidCam, IP Webcam).
+
+        Instead of parsing MJPEG streams (which OpenCV/FFmpeg often fails at),
+        this fetches individual /shot.jpg snapshots — much more reliable.
+        Uses urllib (stdlib, always available) as primary HTTP client.
+        """
+        import re
+        from urllib.request import urlopen
+        from urllib.error import URLError
+
+        # Derive the base URL (strip any path like /video, /shot.jpg, etc.)
+        source = self.camera_source
+        match = re.match(r'(https?://[^/]+)', source)
+        if not match:
+            print(f"[CAMERA] Cannot extract base URL from: {source}")
+            return False
+        base_url = match.group(1)
+
+        # Snapshot endpoints to try (most common first)
+        snapshot_paths = [
+            "/shot.jpg",         # DroidCam & IP Webcam
+            "/photo.jpg",        # Some IP Webcam versions
+            "/capture",          # Alternative
+            "/snap.jpg",         # Alternative
+        ]
+
+        for path in snapshot_paths:
+            url = base_url + path
+            try:
+                print(f"[CAMERA] Trying snapshot: {url} ...", end=" ")
+                resp = urlopen(url, timeout=3)
+                data = resp.read()
+                print(f"status={resp.status}, bytes={len(data)}")
+
+                if resp.status == 200 and len(data) > 1000:
+                    # Verify it's a valid JPEG by decoding
+                    nparr = np.frombuffer(data, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if frame is not None and frame.size > 0:
+                        self._snapshot_url = url
                         self.is_droidcam = True
-                        
-                        # Test reading a frame
-                        frame = self._read_droidcam_frame()
-                        if frame is not None:
-                            print("[INFO] Successfully connected to DroidCam")
-                            return True
-                except Exception as e:
-                    continue
-            
-            return False
-        except Exception as e:
-            print(f"[DEBUG] DroidCam connection failed: {e}")
-            return False
+                        self.droidcam_session = True  # flag — we use urllib
+                        print(f"[CAMERA] ✓ Snapshot mode active: {url} "
+                              f"({frame.shape[1]}x{frame.shape[0]})")
+                        self._start_frame_thread()
+                        return True
+                    else:
+                        print(f"[CAMERA]   ✗ {path}: got data but cv2.imdecode failed")
+                else:
+                    print(f"[CAMERA]   ✗ {path}: status={resp.status}, too small ({len(data)} bytes)")
+            except URLError as e:
+                print(f"URLError: {e.reason}")
+            except Exception as e:
+                print(f"Error: {e}")
+                continue
+
+        self.is_droidcam = False
+        self.droidcam_session = None
+        return False
 
     def _read_droidcam_frame(self) -> Optional[np.ndarray]:
-        """Read a frame from DroidCam MJPEG stream."""
+        """Fetch a single JPEG snapshot from the camera's /shot.jpg endpoint."""
         try:
-            if self.droidcam_session is None:
+            url = getattr(self, '_snapshot_url', None)
+            if not url or not self.droidcam_session:
                 return None
-                
-            response = self.droidcam_session.get(self.camera_source, stream=True, timeout=5)
-            
-            # Parse MJPEG boundary
-            boundary = response.headers.get('content-type', '').split('boundary=')
-            if len(boundary) < 2:
-                # Try reading as raw JPEG
-                if response.content:
-                    nparr = np.frombuffer(response.content, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    return frame
+
+            from urllib.request import urlopen
+            resp = urlopen(url, timeout=2)
+            data = resp.read()
+            if resp.status != 200 or len(data) < 500:
                 return None
-            
-            boundary = boundary[1].encode()
-            data = response.content
-            
-            # Find JPEG frame in MJPEG stream
-            start = data.find(b'\xff\xd8')  # JPEG SOI
-            end = data.find(b'\xff\xd9')    # JPEG EOI
-            
-            if start != -1 and end != -1 and end > start:
-                jpeg_data = data[start:end + 2]
-                nparr = np.frombuffer(jpeg_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                return frame
-            
-            return None
-        except Exception as e:
-            print(f"[DEBUG] Error reading DroidCam frame: {e}")
+
+            nparr = np.frombuffer(data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            return frame
+        except Exception:
             return None
 
     @classmethod
     def try_connect_external(cls, ip: str, port: str) -> Optional['CameraCapture']:
-        """Try to connect to an external camera using multiple URL formats."""
+        """Try to connect to an external camera using multiple methods.
+
+        Priority:
+          1. Snapshot mode (/shot.jpg) — fast, no MJPEG parsing, works with DroidCam
+          2. OpenCV VideoCapture with various URLs — for RTSP and other cameras
+        """
         print(f"[INFO] Checking if {ip}:{port} is reachable...")
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -213,8 +301,18 @@ class CameraCapture:
             print(f"[ERROR] Host {ip}:{port} is unreachable. Fast-failing. ({e})")
             return None
 
+        print(f"[INFO] Host is up.")
+
+        # ── 1. Try snapshot mode first (fastest, most reliable for DroidCam) ──
+        print(f"[INFO] Trying snapshot mode for {ip}:{port}...")
+        cam = cls(camera_source=f"http://{ip}:{port}/shot.jpg")
+        if cam._try_snapshot_connection():
+            print(f"  ✓ Snapshot mode connected!")
+            return cam
+
+        # ── 2. Fall back to OpenCV VideoCapture URLs ──
         urls = cls.build_external_urls(ip, port)
-        print(f"[INFO] Host is up. Trying {len(urls)} URL formats for {ip}:{port}...")
+        print(f"[INFO] Snapshot failed. Trying {len(urls)} OpenCV URL formats...")
 
         for url in urls:
             print(f"  Trying: {url}")
@@ -226,7 +324,7 @@ class CameraCapture:
                 cam.cap.release()
                 cam.cap = None
 
-        print(f"[ERROR] All URL formats failed for {ip}:{port}")
+        print(f"[ERROR] All connection methods failed for {ip}:{port}")
         return None
 
     @classmethod
@@ -300,9 +398,15 @@ class CameraCapture:
         if self.cap is None or not self.cap.isOpened():
             return None
 
-        # Single grab to flush the internal buffer, then read
-        self.cap.grab()
-        ret, frame = self.cap.read()
+        # stderr is already redirected at camera open time for external cams
+        if self.is_external:
+            # IP cameras over HTTP MJPEG can break if you grab() before read()
+            ret, frame = self.cap.read()
+        else:
+            # Local cameras: flush buffer with a grab() then read() to reduce latency
+            self.cap.grab()
+            ret, frame = self.cap.read()
+
         if not ret or frame is None:
             return None
 
@@ -406,8 +510,7 @@ class CameraCapture:
         return None
 
     def release(self) -> None:
-        """Release the camera, stop the frame grabber, and close windows."""
-        # Stop the background thread first
+        """Stop the background thread and release the camera hardware."""
         self._stop_frame_thread()
 
         if self.droidcam_session is not None:
@@ -420,6 +523,8 @@ class CameraCapture:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        self._restore_stderr()
+        print(f"[INFO] Camera released ({self.camera_source})")
         try:
             cv2.destroyAllWindows()
         except cv2.error:

@@ -73,7 +73,8 @@ class BlinkDetection:
     def run_challenge(self, camera,
                       pad_passed: bool = True,
                       use_gui: bool = False,
-                      update_frame_callback=None) -> Tuple[bool, str]:
+                      update_frame_callback=None,
+                      update_ui_callback=None) -> Tuple[bool, str]:
         """
         Run the blink detection liveness challenge.
 
@@ -91,7 +92,11 @@ class BlinkDetection:
         cal_start = time.time()
 
         frame_skip = 0
-        while time.time() - cal_start < 2.5:
+        while time.time() - cal_start < 1.0:
+            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
+                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
+                    return False, "Aborted by user."
+
             frame = camera.read_frame()
             if frame is None:
                 time.sleep(0.01)
@@ -132,14 +137,11 @@ class BlinkDetection:
         blink_threshold = baseline * 0.70
         print(f"[BLINK] Baseline EAR: {baseline:.3f}, Blink threshold: {blink_threshold:.3f}")
 
-        # ── Phase 2: Short random delay before prompt ──
-        delay = random.uniform(0.5, 1.5)
-        print(f"[BLINK] Waiting {delay:.1f}s before prompt...")
+        # ── Phase 2: Short random delay before detection ──
+        delay = random.uniform(0.2, 0.6)
+        print(f"[BLINK] Waiting {delay:.1f}s before detection...")
         time.sleep(delay)
-
-        # Voice prompt (already spoken by the pipeline, so just log)
-        import modules.ai_voice_bot as avb
-        avb.bot.speak("please blink now")
+        # Voice prompt already spoken by the pipeline, skip redundant TTS
         print("[BLINK] Please BLINK now!")
 
         # ── Phase 3: Detect blink ──
@@ -151,19 +153,33 @@ class BlinkDetection:
 
         frame_skip = 0
         while time.time() - start_time < timeout:
+            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
+                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
+                    return False, "Aborted by user."
+
             frame = camera.read_frame()
             if frame is None:
                 time.sleep(0.01)
                 continue
                 
             frame_skip += 1
-            if frame_skip % 2 != 0:
-                if update_frame_callback:
-                    update_frame_callback(frame)
-                continue
-                
+
             if update_frame_callback:
-                update_frame_callback(frame)
+                update_frame_callback(frame.copy())
+            
+            if update_ui_callback:
+                elapsed = time.time() - start_time
+                remaining = max(0, timeout - elapsed)
+                bar_total = 20
+                bar_filled = int((elapsed / timeout) * bar_total)
+                bar_empty = bar_total - bar_filled
+                bar = "█" * bar_filled + "░" * bar_empty
+                update_ui_callback(
+                    f"👀  Action required: Blink now!\n"
+                    f"     {bar}  {remaining:.0f}s")
+
+            if frame_skip % 2 != 0:
+                continue
 
             # Use downscaled frame for speed
             small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)

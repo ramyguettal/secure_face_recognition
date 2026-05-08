@@ -41,7 +41,7 @@ This system implements **Zero-Persistence** for sensitive biometric buffers and 
 pip install -r requirements.txt
 ```
 
-> **Note:** `face_recognition` requires `dlib`, which needs CMake and C++ build tools.
+> **Note:** `face_recognition` requires `dlib`
 > On Windows: install Visual Studio Build Tools with "Desktop development with C++".
 > Or install a pre-built wheel: `pip install dlib` from [dlib releases](https://github.com/sachadee/Dlib).
 

@@ -64,17 +64,21 @@ class VoiceChallenge:
             print(f"[VOICE] Speaker verification error: {e}")
             return True, 1.0
 
-    def run_challenge(self, user_id: str,
-                      update_ui_callback: Optional[Callable[[str], None]] = None
+    def run_challenge(self, camera, user_id: str,
+                      update_ui_callback: Optional[Callable[[str], None]] = None,
+                      update_frame_callback: Optional[Callable] = None
                       ) -> Tuple[bool, str]:
         """
-        Full voice challenge flow with visual countdown timer.
+        Full voice challenge flow with visual countdown timer on UI and camera frame.
 
         Args:
+            camera: CameraCapture instance to read frames from.
             user_id: Enrolled user ID for voiceprint comparison.
             update_ui_callback: Callable(text) to update the GUI challenge label.
+            update_frame_callback: Callable(frame) to draw the frame in GUI.
         """
         import modules.ai_voice_bot as avb
+        import cv2
 
         phrases = [
             "the sky is blue",
@@ -82,6 +86,15 @@ class VoiceChallenge:
             "open sesame",
             "secure authorization confirmed",
             "voice identity recognized",
+            "biometric access granted",
+            "encryption key verified",
+            "authentication successful",
+            "identity confirmation active",
+            "multi-layer security check",
+            "system integrity verified",
+            "advanced neural matching",
+            "cybersecurity protocol active",
+            "digital signature confirmed"
         ]
         phrase = random.choice(phrases)
 
@@ -90,21 +103,26 @@ class VoiceChallenge:
             update_ui_callback(f"🎤  Listen carefully...")
         avb.bot.speak_sync(f"now say: {phrase}")
 
-        # ── 2. GET READY countdown (3-2-1) ──
-        for countdown in [3, 2, 1]:
+        # ── 2. GET READY countdown (2-1) ──
+        for countdown in [2, 1]:
             if update_ui_callback:
                 update_ui_callback(
                     f"🎙️  Get ready to say: \"{phrase}\"\n"
                     f"     Recording in {countdown}...")
-            time.sleep(1.0)
+            # Keep video feed alive during countdown
+            t_end = time.time() + 0.75
+            while time.time() < t_end:
+                if update_ui_callback and hasattr(update_ui_callback, '__self__'):
+                    if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
+                        return False, "Aborted by user."
+                if camera and update_frame_callback:
+                    frame = camera.read_frame()
+                    if frame is not None:
+                        update_frame_callback(frame)
+                time.sleep(0.02)
 
         # ── 3. RECORDING with live timer ──
-        duration = 8
-
-        if update_ui_callback:
-            update_ui_callback(
-                f"🔴  RECORDING NOW!  Say: \"{phrase}\"\n"
-                f"     ⏱️  {duration}s remaining")
+        duration = 5
 
         # Record to secure temp directory (not project root)
         record_result = [None]
@@ -115,9 +133,16 @@ class VoiceChallenge:
         rec_thread.start()
 
         start = time.time()
+        frame_skip = 0
         while rec_thread.is_alive():
+            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
+                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
+                    # We can't easily kill the recording thread, but we can stop waiting for it
+                    return False, "Aborted by user."
+
             elapsed = time.time() - start
             remaining = max(0, duration - elapsed)
+            
             if update_ui_callback:
                 bar_total = 20
                 bar_filled = int((elapsed / duration) * bar_total)
@@ -126,7 +151,15 @@ class VoiceChallenge:
                 update_ui_callback(
                     f"🔴  RECORDING NOW!  Say: \"{phrase}\"\n"
                     f"     {bar}  {remaining:.0f}s")
-            time.sleep(0.25)
+            
+            if camera and update_frame_callback:
+                frame = camera.read_frame()
+                if frame is not None:
+                    frame_skip += 1
+                    if frame_skip % 2 == 0:
+                        update_frame_callback(frame.copy())
+            
+            time.sleep(0.02)
 
         wav_file = record_result[0] or "voice_auth_challenge.wav"
 
