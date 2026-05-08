@@ -58,7 +58,7 @@ class VoiceChallenge:
                 np.linalg.norm(stored_vp) * np.linalg.norm(live_vp) + 1e-8))
 
             print(f"[VOICE] Speaker similarity: {similarity:.3f}")
-            return similarity >= 0.55, similarity
+            return similarity >= 0.75, similarity
 
         except Exception as e:
             print(f"[VOICE] Speaker verification error: {e}")
@@ -86,15 +86,6 @@ class VoiceChallenge:
             "open sesame",
             "secure authorization confirmed",
             "voice identity recognized",
-            "biometric access granted",
-            "encryption key verified",
-            "authentication successful",
-            "identity confirmation active",
-            "multi-layer security check",
-            "system integrity verified",
-            "advanced neural matching",
-            "cybersecurity protocol active",
-            "digital signature confirmed"
         ]
         phrase = random.choice(phrases)
 
@@ -112,9 +103,6 @@ class VoiceChallenge:
             # Keep video feed alive during countdown
             t_end = time.time() + 0.75
             while time.time() < t_end:
-                if update_ui_callback and hasattr(update_ui_callback, '__self__'):
-                    if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
-                        return False, "Aborted by user."
                 if camera and update_frame_callback:
                     frame = camera.read_frame()
                     if frame is not None:
@@ -135,11 +123,6 @@ class VoiceChallenge:
         start = time.time()
         frame_skip = 0
         while rec_thread.is_alive():
-            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
-                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
-                    # We can't easily kill the recording thread, but we can stop waiting for it
-                    return False, "Aborted by user."
-
             elapsed = time.time() - start
             remaining = max(0, duration - elapsed)
             

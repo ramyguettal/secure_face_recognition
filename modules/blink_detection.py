@@ -93,10 +93,6 @@ class BlinkDetection:
 
         frame_skip = 0
         while time.time() - cal_start < 1.0:
-            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
-                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
-                    return False, "Aborted by user."
-
             frame = camera.read_frame()
             if frame is None:
                 time.sleep(0.01)
@@ -153,10 +149,6 @@ class BlinkDetection:
 
         frame_skip = 0
         while time.time() - start_time < timeout:
-            if update_ui_callback and hasattr(update_ui_callback, '__self__'):
-                if getattr(update_ui_callback.__self__, 'pipeline_abort', False):
-                    return False, "Aborted by user."
-
             frame = camera.read_frame()
             if frame is None:
                 time.sleep(0.01)
